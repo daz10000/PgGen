@@ -27,6 +27,14 @@ let db =  {
                             { CName = "taxonomy" ; CType = String ; Nullable = true ; Array = true}
                         ]
                 }
+                {
+                        TName = "tombstone"
+                        Cols = [
+                            { CName = "id" ; CType = Id ; Nullable = false ; Array = false}
+                            { CName = "name" ; CType = String ; Nullable = false ; Array = false}
+                            { CName = "processed" ; CType = Timestamp ; Nullable = false ; Array = false}
+                        ]
+                }
             ]
         }
     ]
