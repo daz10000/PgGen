@@ -18,7 +18,7 @@ and ColumnType =
         | Id -> "int"
         | String -> "text"
         | Int32 -> "int"
-        | Timestamp -> "timestamptz with default now()"
+        | Timestamp -> "timestamptz default now()"
 
 and Column = {
     CName : string
