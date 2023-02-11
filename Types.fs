@@ -26,3 +26,7 @@ and Column = {
     Nullable : bool
     Array : bool
 }
+
+type Modifier =
+    | Nullable
+    | Array

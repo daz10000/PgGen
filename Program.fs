@@ -1,5 +1,6 @@
 ﻿module PgGen.Main
 
+open Build
 let owner = "read_write"
 
 let db =  {
@@ -10,29 +11,29 @@ let db =  {
             Tables = [
                 {
                         TName = "uniprot_entry"
-                        Cols = [{   CName = "id" ; CType = Id ; Nullable = false ; Array = false}
-                                {   CName = "name" ; CType = String ; Nullable = false ; Array = false}
-                                {   CName = "common_name" ; CType = String ; Nullable = true ; Array = false}
-                                {   CName = "accno" ; CType = String ; Nullable = false ; Array = false}
-                                {   CName = "secondary" ; CType = String ; Nullable = false ; Array = true}
+                        Cols = [col "id" Id []
+                                col "name" String []
+                                col "common_name" String [Nullable]
+                                col "accno" String []
+                                col "secondary" String [Array]
                             ]
                 }
                 {
                         TName = "organism"
                         Cols = [
-                            { CName = "id" ; CType = Id ; Nullable = false ; Array = false}
-                            { CName = "name" ; CType = String ; Nullable = false ; Array = false}
-                            { CName = "id_taxon" ; CType = Int32 ; Nullable = true ; Array = false}
-                            { CName = "common_name" ; CType = String ; Nullable = true ; Array = false}
-                            { CName = "taxonomy" ; CType = String ; Nullable = true ; Array = true}
+                            col "id"  Id []
+                            col "name"  String []
+                            col "id_taxon"  Int32 [Nullable]
+                            col "common_name"  String [Nullable]
+                            col "taxonomy"  String [Nullable ; Array]
                         ]
                 }
                 {
                         TName = "tombstone"
                         Cols = [
-                            { CName = "id" ; CType = Id ; Nullable = false ; Array = false}
-                            { CName = "name" ; CType = String ; Nullable = false ; Array = false}
-                            { CName = "processed" ; CType = Timestamp ; Nullable = false ; Array = false}
+                            col "id"  Id []
+                            col "name"  String []
+                            col "processed"  Timestamp []
                         ]
                 }
             ]
