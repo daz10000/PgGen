@@ -1,7 +1,7 @@
 # PgGen
 
 ## Intro
-Postgres schema generation, following my own idiosyncratic style (heavily influences by [PgModeler}(https://pgmodeler.io/)
+Postgres schema generation, following my own idiosyncratic style (heavily influenced by [PgModeler}(https://pgmodeler.io/)
 
 ## Features
 
@@ -9,14 +9,51 @@ Generates SQL for
     - database creation
     - schema creation
     - simple table creation
+    - foreign key references, unique constraints
+
+## Example
+
+```FSharp
+
+let db =
+    db "proteins" [ Owner "read_write" ] [
+        schema "enzyme" [] [
+                table "uniprot_entry" [] [
+                                col "id" Id []
+                                col "name" String []
+                                col "common_name" String [Nullable]
+                                col "accno" String []
+                                col "secondary" String [Array]
+                            ]
+                table "organism" [] [
+                            col "id"  Id []
+                            col "name"  String []
+                            col "id_taxon"  Int32 [Nullable]
+                            col "common_name"  String [Nullable]
+                            col "taxonomy"  String [Nullable ; Array]
+                        ]
+
+                table "uniprot_data" [ Comment "largely json structured data"] [
+                    col "id" Id []
+                    col "keywords" Jsonb [] 
+                    col "genes" Jsonb []
+                    col "comments" Jsonb []
+                    col "features" Jsonb []
+                    frefId "uniprot_entry" // add an id_uniprot_entry reference to table proteins.uniprot_entry.id
+                ] ] ]
+
+let output = Generate.emitDatabase db
+
+printfn $"{output}"
+
+```
 
 ## Todo
 
-- referential integrity
-- support for indices, unique fields
-- simplify creation syntax (heavy F# expressions right now)
-- consider parsing a different input format (F# data structures with tags?)
+- support for indices
+- more field types
 - generation of boiler plate IO code
+- consider parsing a different input format (F# data structures with tags?)
 
 ## Random ideas
 - auto type selection (id -> int,  name -> text)
@@ -42,12 +79,3 @@ MyDb
             col5
         table4
 ```
-
-
-### Example for ref integrity'
-
-CONSTRAINT atype_refers_to_atype_id FOREIGN KEY (id_atype) references enzyme.atype(id)
-
-### Example for unique
-
-CONSTRAINT attribute_signature_unique UNIQUE (signature)
