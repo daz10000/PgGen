@@ -9,33 +9,25 @@ let db =  {
     Schemas = [
         {   SName = "enzyme"
             Tables = [
-                {
-                        TName = "uniprot_entry"
-                        Cols = [col "id" Id []
+                table "uniprot_entry" [] [
+                                col "id" Id []
                                 col "name" String []
                                 col "common_name" String [Nullable]
                                 col "accno" String []
                                 col "secondary" String [Array]
                             ]
-                }
-                {
-                        TName = "organism"
-                        Cols = [
+                table "organism" [] [
                             col "id"  Id []
                             col "name"  String []
                             col "id_taxon"  Int32 [Nullable]
                             col "common_name"  String [Nullable]
                             col "taxonomy"  String [Nullable ; Array]
                         ]
-                }
-                {
-                        TName = "tombstone"
-                        Cols = [
-                            col "id"  Id []
+                table "tombstone" [] [
+                            col "id" Id []
                             col "name"  String []
                             col "processed"  Timestamp []
                         ]
-                }
             ]
         }
     ]

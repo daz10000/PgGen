@@ -27,6 +27,15 @@ and Column = {
     Array : bool
 }
 
-type Modifier =
+type ColumnMatters =
     | Nullable
     | Array
+
+/// Things in the table itself (cols et al)
+type TableBodyItem =
+    | ColumnItem of Column
+    | Unique
+    | ForeignRef
+
+type TableAttr =
+    | FooBar // fixfix
