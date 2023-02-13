@@ -48,6 +48,23 @@ printfn $"{output}"
 
 ```
 
+```
++------------------+--------------------------+-------------------------------------------------------------------+
+| Column           | Type                     | Modifiers                                                         |
+|------------------+--------------------------+-------------------------------------------------------------------|
+| id               | integer                  |  not null default nextval('enzyme.uniprot_data_id_seq'::regclass) |
+| keywords         | jsonb[]                  |  not null                                                         |
+| refs             | jsonb[]                  |  not null                                                         |
+| comments         | jsonb[]                  |  not null                                                         |
+| genes            | jsonb[]                  |  not null                                                         |
+| features         | jsonb[]                  |  not null                                                         |
+| created          | timestamp with time zone |  not null default now()                                           |
+| updated          | timestamp with time zone |  not null default now()                                           |
+| id_uniprot_entry | integer                  |  not null                                                         |
++------------------+--------------------------+-------------------------------------------------------------------+
+```
+
+
 ## Todo
 
 - support for indices

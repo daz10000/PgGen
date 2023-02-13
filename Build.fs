@@ -57,6 +57,9 @@ let db (name:string) (dbAttr:DBAttr list) (body:DBBodyItem list) =
             | _ -> defaultOwner
     }
 
+let unique (cols:string list) =
+    Unique {
+        Cols = cols }
 let frefId (reference:string) =
     let schema, table =
         match reference with

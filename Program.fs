@@ -1,18 +1,10 @@
 ﻿module PgGen.Main
 
 open Build
-let owner = "read_write"
 
 let db =
     db "proteins" [ Owner "read_write" ] [
         schema "enzyme" [] [
-                table "uniprot_entry" [] [
-                                col "id" Id []
-                                col "name" String []
-                                col "common_name" String [Nullable]
-                                col "accno" String []
-                                col "secondary" String [Array]
-                            ]
                 table "organism" [] [
                             col "id"  Id []
                             col "name"  String []
@@ -25,23 +17,37 @@ let db =
                             col "name"  String []
                             col "processed"  Timestamp []
                         ]
-                // table "evidence" [] [
-                //     col "id" Id []
-                //     col "evidence_code" String []
-                //     col "source" String []
-                //     col "unicode_id" Int32 []
-                // ]
+
+                table "uniprot_entry" [] [
+                                col "id" Id []
+                                col "uniprot_kb_id" String [Nullable]
+                                col "common_name" String [Nullable]
+                                col "accno" String []
+                                col "secondary" String [Array]
+                                col "entry_version" Int32 []
+                                col "seq_version" Int32 []
+                                col "last_annotation_update" Timestamp []
+                                col "last_seq_update" Timestamp []
+                                frefId "ec_group"
+                                frefId "protein_sequence"
+                                frefId "organism"
+                                unique ["id_ec_group";"accno"]
+                            ]
 
                 table "uniprot_data" [ Comment "largely json structured data"] [
                     col "id" Id []
-                    col "keywords" Jsonb [] // id, category, name triples
-                    col "genes" Jsonb []
-                    col "comments" Jsonb []
-                    col "features" Jsonb []
+                    col "keywords" Jsonb [Array] // id, category, name triples
+                    col "refs" Jsonb [Array]
+                    col "comments" Jsonb [Array]
+                    col "genes" Jsonb [Array]
+                    col "features" Jsonb [Array]
+
+                    col "created" Timestamp []
+                    col "updated" Timestamp []
                     frefId "uniprot_entry" // associated uniprot_entry
                 ]
 
-                table "uniprot_rxn" [] [
+                table "uniprot_rxn" [Comment "text description of reactions and references to other rxn dbs"] [
                     col "id" Id []
                     col "name" String []
                     frefId "uniprot_entry"

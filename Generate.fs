@@ -32,25 +32,23 @@ let emitTable owner schema (table:Table) =
                     let colsConcat = String.Join("_",unique.Cols)
                     let colsConcatComma = String.Join(",",unique.Cols)
                     let name = $"uq_{table.TName}_{colsConcat}"
-                    yield $"                        CONSTRAINT {name} UNIQUE({colsConcatComma}"
+                    yield $"    CONSTRAINT {name} UNIQUE({colsConcatComma})"
 
                 // Foreign reference constraints
                 for fr in table.FRefs do
                     let frCols = String.Join("_",fr.FromCols)
                     let toCols = String.Join("_",fr.ToCols)
-                    let name = $"fk_{table.TName}_{frCols}_refs_{fr.ToTable}_{toCols}"
+                    let name = $"{frCols}_refers_to_{fr.ToTable}"
                     let toSchema = fr.ToSchema |> Option.defaultValue schema // default to current schema
                     let toTable = fr.ToTable
-                    let frSchema = schema
-                    let frTable = table.TName
-                    yield $"    CONSTRAINT {name} FOREIGN KEY {frSchema}.{frTable}({frCols}) REFERENCES {toSchema}.{toTable}({toCols})"
+                    yield $"    CONSTRAINT {name} FOREIGN KEY ({frCols}) REFERENCES {toSchema}.{toTable}({toCols})"
             |]
         yield String.Join(",\n",cols)
         yield $"\n);\n\n"
         for attr in table.Attributes do
             match attr with
             | Comment c->
-                yield $"COMMENT on {schema}.{table.TName} is '{c}';\n"
+                yield $"COMMENT on TABLE {schema}.{table.TName} is '{c}';\n"
         yield $"ALTER TABLE {schema}.{table.TName} OWNER TO {owner};\n"
         yield "\n"
     }
@@ -69,6 +67,18 @@ let emitSchema owner (schema:Schema) =
     }
 
 let emitDatabase (d:Db) =
+    let errs = [|
+        for schema in d.Schemas do
+            for t in schema.Tables do
+                for c in t.Cols do
+                    if Reserved.isReserved c.CName then
+                        yield $"ERROR: {c.CName} is a reserved keyword in postgres"
+    |]
+    if errs.Length > 0 then
+        for e in errs do
+            printfn $"{e}"
+        exit 1
+
     stringBuffer {
         yield "; run as superuser...\n"
         yield $"CREATE DATABASE {d.DName} WITH OWNER {d.Owner};\n\n"
