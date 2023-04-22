@@ -10,7 +10,6 @@
     <Compile Include="StringBuilder.fs" />
     <Compile Include="Generate.fs" />
     <Compile Include="Build.fs" />
-    <Compile Include="Build.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 </Project>
