@@ -1,6 +1,7 @@
 namespace PgGen
 
 
+open System
 type Db = { DName : string ; Owner : string ; Schemas : Schema list ; Comment : string option }
 and Schema = { SName : string ; Tables : Table list ; Comment : string option ; Enums : PEnum list}
 
@@ -42,7 +43,10 @@ and Table = {
         FRefs : ForeignRef list
         ERefs : EnumRef list
         Uniques : Unique list
-}
+} with
+    member x.FSharpName() =
+        x.TName.Split([|'_'|])
+        |> Array.map (fun (s:string) -> s.[0].ToString().ToUpper() + s.[1..]) |> String.concat ""
 and TableAttr =
     | Comment of string
     | TBD
@@ -62,6 +66,14 @@ and ColumnType =
         | Int32 -> "int"
         | Timestamp -> "timestamptz default now()"
         | Jsonb -> "jsonb"
+    member x.FSharpType() =
+        match x with
+        | Id -> "int"
+        | String -> "string"
+        | Bool -> "bool"
+        | Int32 -> "int"
+        | Timestamp -> "DateTime"
+        | Jsonb -> "string"
 
 and Column = {
     CName : string
@@ -69,7 +81,10 @@ and Column = {
     Nullable : bool
     Array : bool
     Comment : string option
-}
+} with
+    member x.FSharpName() =
+        x.CName.Split([|'_'|])
+        |> Array.map (fun (s:string) -> s.[0].ToString().ToUpper() + s.[1..]) |> String.concat ""
 
 and PEnum = {
     EName : string

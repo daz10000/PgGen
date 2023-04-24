@@ -8,3 +8,7 @@ let (|Regex|_|) pattern input =
         Some (List.tail [ for g in m.Groups -> g.Value ])
     else
         None
+
+let toFSharp (s:string) =
+    s.Split([|'_'|]) |> Array.map (fun (s:string) -> s.[0].ToString().ToUpper() + s.[1..])
+    |> String.concat ""
