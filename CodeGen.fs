@@ -7,11 +7,9 @@ open System.IO
 open PgGen.StringBuffer
 open Common
 open System
+open PgGen.CodeStatic
 
 
-let compileTimeDbFile = "compile_time_db.txt"
-let titleCase (s:string) =
-    System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s)
 let createModuleName suffix (project:string) (domain:string) =
     $"{project}.Domain.{domain}.{suffix}"
 
@@ -24,13 +22,9 @@ let ensureFolder(folder:string) =
 // todo: not sure we are doing this on sql generation side to be consistent
 let postgrestify (s:string) =
     s.Replace(" ","_").Replace("-","_").ToLowerInvariant()
-let createStorageModuleName  proj domain = createModuleName "Storage" proj domain
-let createApiModuleName  proj domain = createModuleName "Api" proj domain
-let createServiceModuleName  proj domain = createModuleName "Service" proj domain
-let createDomainModuleName  proj domain = createModuleName "Domain" proj domain
+
 let emitDomain (proj:string) (s:Schema) =
     let domain = titleCase s.SName
-    let pKeyType = "int" // fixfix todo: could vary long term but for now, hardcode
     let projCap = proj |> titleCase
 
 
@@ -47,41 +41,96 @@ let emitDomain (proj:string) (s:Schema) =
             if needsSystem then
                 yield $"open System\n"
             for t in s.Tables do
-                let titleCap = t.TName |> titleCase
                 let fsharpName = t.FSharpName()
                 let colsExceptKey = t.Cols |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
 
+                let availCols = [   for c in t.Cols do
+                                        yield {| Name = c.CName;Type = c.CType.FSharpType(); IsArray = c.Array |}
+                                    for fr in t.FRefs do
+                                        if fr.Generate then
+                                            let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}"
+                                            yield {| Name = colName;Type = "int" ; IsArray = false |}
+                                        else
+                                            failwithf "not implemented - not integer foreign key references"
+                                    ]
 
                 yield $" // -------------------------------------------\n"
                 yield $" // {t.TName}\n"
                 yield $" // -------------------------------------------\n"
                 yield $"type Create{fsharpName} = {{\n"
                 for col in colsExceptKey do
-                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}\n"
+                    let optionModifier =
+                        if col.Nullable then
+                            " option"
+                        else
+                            ""
+                    let arrayModifier = if col.Array then " []" else ""
+                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
                 for fr in t.FRefs do
                     if fr.Generate then
                         let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
                         yield $"    {colName} : int\n"
+                    else
+                        failwithf "Not implemented - not integer foreign key references"
                 yield $"}}"
                 yield "\n"
 
                 yield $"type Update{fsharpName} = {{\n"
                 for col in colsExceptKey do
-                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}\n"
+                    let optionModifier =
+                        if col.Nullable then
+                            " option"
+                        else
+                            ""
+                    let arrayModifier = if col.Array then " []" else ""
+                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
                 for fr in t.FRefs do
                     if fr.Generate then
                         let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
-                        yield $"    {colName} : int\n"
+                        let optionModifier =
+                            if fr.IsNullable then
+                                " option"
+                            else
+                                ""
+                        yield $"    {colName} : int{optionModifier}\n"
                 yield $"}}"
                 yield "\n"
                 yield $"type {fsharpName} = {{\n"
                 for col in t.Cols do
-                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}\n"
+                    let optionModifier =
+                        if col.Nullable then
+                            " option"
+                        else
+                            ""
+                    let arrayModifier = if col.Array then " []" else ""
+                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
                 for fr in t.FRefs do
                     if fr.Generate then
                         let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
-                        yield $"    {colName} : int\n"
+                        let optionModifier =
+                            if fr.IsNullable then
+                                " option"
+                            else
+                                ""
+                        yield $"    {colName} : int{optionModifier}\n"
                 yield $"}}"
+
+                // Tables that aren't using a simple integer key need a custom primary key type
+                match t.PKey with
+                | Some pk ->
+                    yield $"\n"
+                    yield $"type {t.PKeyName()}= {{\n"
+                    for colName in pk.Cols do
+                        let c =
+                            match availCols|> List.tryFind (fun c -> c.Name = colName) with
+                            | Some x -> x
+                            | None ->
+                                failwithf $"Could not find column primary key referenced '{colName}' in table '{t.TName}' cols {availCols}"
+
+                        let optionalArray = if c.IsArray then " []" else ""
+                        yield $"    {c.Name |> toFSharp} : {c.Type}{optionalArray}\n"
+                    yield $"}}"
+                | None -> ()
                 yield "\n"
 
         }
@@ -89,17 +138,56 @@ let emitDomain (proj:string) (s:Schema) =
         stringBuffer {
             yield $"module {projCap}.Domain.{domain}.Storage\n"
             yield $"\n"
-            yield $"open {projCap}.Common.Db\n"
+            yield $"open {projCap}.Db\n"
             yield $"open {projCap}.Domain.{domain}\n"
+            yield $"open Plough.ControlFlow\n"
 
             for t in s.Tables do
-                let titleCap = t.TName |> titleCase
-                let colsExceptKey = t.Cols |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
+                let colsExceptKey = t.FullCols() |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
                 let colNamesExceptKey = String.Join(",",[for c in colsExceptKey  -> postgrestify c.CName])
-                let placeHolders = String.Join(",",[for c in colsExceptKey  -> $"@{c.CName}"])
-                let assignedValues = String.Join(",",[for c in colsExceptKey  -> $"{postgrestify c.CName}=request.{c.FSharpName()|> titleCase}"])
+                let placeHolders =
+                    String.Join(",",[for c in colsExceptKey  ->
+                                            if c.Nullable then
+                                                let defaultVPostgres =
+                                                    match c.CType with
+                                                    | Int32 -> "-1"
+                                                    | String -> "''"
+                                                    | Timestamp -> "'0001-01-01'"
+                                                    | Jsonb -> "'{}'::jsonb"
+                                                    | _ -> failwithf $"Not implemented - default value for {c.CType}"
+                                                $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)"
+                                            else
+                                                $"@{c.CName}"
+                                    ]
+                    )
+                let fullPostgresCols =
+                    String.Join(",",[for c in t.FullCols()  -> postgrestify c.CName])
+                let assignedValues =
+                    String.Join(",",[for c in colsExceptKey  ->
+                                        let optionalNullHack =
+                                            if c.Nullable then
+                                                if c.Array then
+                                                    failwith $"Not implemented - nullable array columns"
+                                                let defaultV =
+                                                    match c.CType with
+                                                    | Int32 -> "-1"
+                                                    | String -> "\"\""
+                                                    | Timestamp -> "\"0001-01-01\""
+                                                    | Jsonb -> "\"'{}'\""
+                                                    | _ -> failwithf $"Not implemented - default value for {c.CType}"
+                                                $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
+                                            else
+                                                $"request.{c.FSharpName()}"
+                                        $"{postgrestify c.CName}={optionalNullHack}"])
 
                 let fsharpName = t.FSharpName()
+                let returning,readWhereClause,parameters =
+                    match t.PKey with
+                    | None -> "RETURNING id","id= @id","id=request"
+                    | Some x ->
+                        "", // return nothing where there's a custom primary key
+                        String.Join(" AND ",[for c in x.Cols -> $"{postgrestify c}=@{c}"]),
+                        String.Join(",",[for c in x.Cols -> $"{c}=request.{c |> toFSharp}"])
                 yield $"// -------------------------------------------\n"
                 yield $"// {fsharpName} CRUD operations\n"
                 yield $"// -------------------------------------------\n"
@@ -108,23 +196,40 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    task {{\n"
                 yield $"        use! conn = Db.openConnectionAsync()\n"
                 yield $"        use cmd = Db.CreateCommand<\"\"\"INSERT INTO {s.SName}.{t.TName} (\n"
-                yield $"            {colNamesExceptKey}) VALUES({placeHolders}) RETURNING id\n"
+                yield $"            {colNamesExceptKey}) VALUES({placeHolders}) {returning}\n"
                 yield $"                                   \"\"\",SingleRow=true>(conn)\n"
                 yield $"        let newId = cmd.Execute({assignedValues})\n"
-                yield $"        return newId\n"
+                match t.PKey with
+                | None ->
+                    yield $"        return newId.Value // returns option but should be reliable\n"
+                | Some _ ->
+                    yield $"        return () // complex primary key, no return value\n"
                 yield $"    }}\n"
                 yield $"\n"
-                yield $"let read{fsharpName} (id:{pKeyType}) =\n"
-                yield $"    failwithf \"Not implemented\"\n"
-                yield $"    ()\n"
+                yield $"let read{fsharpName} (request:{t.PKeyName()}) : Task<{fsharpName} option>=\n"
+                yield $"    task {{\n"
+                yield $"        use! conn = Db.openConnectionAsync()\n"
+                yield $"        use cmd = Db.CreateCommand<\"\"\""
+                yield $"        SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} WHERE {readWhereClause}\n"
+                yield $"                                   \"\"\",SingleRow=true>(conn)\n"
+                yield $"        let result = cmd.Execute({parameters})\n"
+                yield $"        return result |> Option.map(fun r->\n"
+                yield $"                                    {{\n"
+                for col in t.FullCols() do
+                    yield $"                                        {col.FSharpName()} = r.{col.CName}\n"
+                yield $"                                    }})\n"
+                yield $"    }}\n"
                 yield $"\n"
                 yield $"let update{fsharpName} (x:Update{fsharpName}) =\n"
-                yield $"    failwithf \"Not implemented\"\n"
-                yield $"    ()\n"
+                yield $"    task {{\n"
+                yield $"        failwithf \"Not implemented\"\n"
+                yield $"    }}"
                 yield $"\n"
-                yield $"let delete{fsharpName} (id:{pKeyType}) =\n"
-                yield $"    failwithf \"Not implemented\"\n"
-                yield $"    ()\n"
+                yield $"let delete{fsharpName} (id:{t.PKeyName()}) =\n"
+                yield $"    task {{\n"
+                yield $"        failwithf \"Not implemented\"\n"
+                yield $"        return \"unimplemented\"\n"
+                yield $"    }}"
                 yield $"\n"
         }
     let apiWireup =
@@ -138,7 +243,6 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"// Wire up the api definition to the service layer calls here\n"
             yield $"let api = {{\n"
             for t in s.Tables do
-                let tableCap = t.TName |> titleCase
                 let fsharpName = t.FSharpName()
                 yield $"    // -------------------------------------------\n"
                 yield $"    Create{fsharpName} = Service.create{fsharpName}\n"
@@ -159,7 +263,7 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"\n"
             yield $"// PgGen: note - these are simple wrappers for now\n"
             for t in s.Tables do
-                let tableCap = t.TName |> titleCase
+                let tableCap = t.FSharpName()
                 yield $"// -------------------------------------------\n"
                 yield $"let create{tableCap} (request:Create{tableCap}) =\n"
                 yield $"    taskEither {{\n"
@@ -167,7 +271,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    }}\n"
                 yield $"\n"
 
-                yield $"let read{tableCap} (request:{pKeyType}) =\n"
+                yield $"let read{tableCap} (request:{t.PKeyName()}) =\n"
                 yield $"    taskEither {{\n"
                 yield $"        return! Storage.read{tableCap} request\n"
                 yield $"    }}\n"
@@ -179,7 +283,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    }}\n"
                 yield $"\n"
 
-                yield $"let delete{tableCap} (request:{pKeyType}) =\n"
+                yield $"let delete{tableCap} (request:{t.PKeyName()}) =\n"
                 yield $"    taskEither {{\n"
                 yield $"        return! Storage.delete{tableCap} request\n"
                 yield $"    }}\n"
@@ -198,11 +302,15 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"\n"
             yield $"type Api ={{\n"
             for t in s.Tables do
-                let tableCap = t.TName |> titleCase
-                yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<{pKeyType}>\n"
-                yield $"    Read{tableCap}   : {pKeyType} -> TaskEither<{tableCap}>\n"
+                let tableCap = t.FSharpName()
+                match t.PKey with
+                | None ->
+                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<{t.PKeyName()}>\n"
+                | Some _ ->
+                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<unit>\n"
+                yield $"    Read{tableCap}   : {t.PKeyName()} -> TaskEither<{tableCap} option>\n"
                 yield $"    Update{tableCap} : Update{tableCap} -> TaskEither<unit>\n"
-                yield $"    Delete{tableCap} : {pKeyType} -> TaskEither<string>\n"
+                yield $"    Delete{tableCap} : {t.PKeyName()} -> TaskEither<string>\n"
             yield $"}}"
         }
 
@@ -223,105 +331,6 @@ let commonFileSource proj =
         yield $"// Shared data structures like User definitions go here\n"
     }
 
-let dbFileSource proj =
-    stringBuffer {
-        yield $"module {proj |> titleCase}.Common.Db\n"
-        yield $"\n"
-        yield $"open Plough.ControlFlow\n"
-        yield $"open System\n"
-        yield $"open FSharp.Data.Npgsql\n"
-        yield $"open FSharp.Data.LiteralProviders\n"
-        yield $"open System.Transactions\n"
-        yield sprintf """
-module AppConfig =
-    [<CLIMutable>]
-    type AppConfig =
-        {   ConnectionString : string
-        }
-
-module Db =
-    let [<Literal>] defaultCommandTimeout = 600
-
-
-    let mutable connectionString = None
-    /// compile time connection string set via lims specific txt file with default value if file not found
-    let [<Literal>] connectionStringCompileTime = TextFile<"%s">.Text
-
-    let [<Literal>] methodTypes = MethodTypes.Task ||| MethodTypes.Sync
-
-type Db<'a>() =
-    static member inline openConnectionAsync() =
-        task {
-            let conn = new Npgsql.NpgsqlConnection(Db.connectionString.Value)
-            do! conn.OpenAsync(Async.DefaultCancellationToken)
-            return conn
-        }
-
-    static member inline openConnection() =
-        let conn = new Npgsql.NpgsqlConnection(Db.connectionString.Value)
-        conn.Open()
-        conn
-
-
-    static member inline createTransactionScope isolationLevel =
-        new TransactionScope(TransactionScopeOption.Required,
-                             TransactionOptions(
-                                 IsolationLevel=isolationLevel,
-                                 Timeout=TransactionManager.MaximumTimeout
-                             ),
-                             TransactionScopeAsyncFlowOption.Enabled)
-
-    //static member inline createTransactionScope () =
-    //    Db.createTransactionScope IsolationLevel.ReadCommitted
-
-type Db = NpgsqlConnection<ConnectionString=Db.connectionStringCompileTime,
-                           CollectionType=CollectionType.ResizeArray, MethodTypes=Db.methodTypes,
-                           Prepare=true, XCtor=true, CommandTimeout=Db.defaultCommandTimeout>
-
-""" compileTimeDbFile
-    }
-
-
-
-// ------ tool file setup
-let paketFile = """source https://api.nuget.org/v3/index.json
-
-framework: net7.0
-storage:none
-
-nuget FSharp.Core
-nuget FSharp.Data.Npgsql >= 2.0.0
-nuget FSharp.Data.LiteralProviders >= 1.0.0
-nuget Npgsql >= 7.0.0
-nuget Plough.ControlFlow >= 1.1.0
-nuget Giraffe >= 6.0.0
-nuget Thoth.Json.Giraffe >= 1.2.2
-nuget Plough.WebApi.Client.Dotnet >= 1.2.2
-#nuget Plough.WebApi.Server >= 1.2.2
-nuget Plough.WebApi.Server.Giraffe >= 1.2.2
-
-"""
-let paketReferencesFile = """FSharp.Core
-Fsharp.Data.Npgsql
-FSharp.Data.LiteralProviders
-Npgsql
-Plough.ControlFlow
-Plough.WebApi.Server.Giraffe
-Plough.WebApi.Client.Dotnet
-"""
-
-let dotnetToolsJson = """{
-  "version": 1,
-  "isRoot": true,
-  "tools": {
-    "paket": {
-      "version": "7.2.1",
-      "commands": [
-        "paket"
-      ]
-    }
-  }
-}"""
 
 let cleanSlash (path:string) =
     path.Replace("\\","/")
@@ -411,14 +420,7 @@ let generate (proj:string) (folder:string) (d:Db) =
             for file in fileNames do
                 yield $"    <Compile Include=\"{file|> cleanSlash}\" />\n"
             yield $"  </ItemGroup>\n"
-            yield $"<ItemGroup>\n"
-            yield $"    <!--\n"
-            yield $"    <PackageReference Include=\"FSharp.Data.Npgsql\" Version=\"[2.0.0)\" />\n"
-            yield $"    <PackageReference Include=\"FSharp.Data.LiteralProviders\" Version=\"[1.0.0)\" />\n"
-            yield $"    <PackageReference Include=\"Npgsql\" Version=\"[7.0.0)\" />\n"
-            yield $"    <PackageReference Include=\"Plough.ControlFlow\" Version=\"[1.1.0)\" />\n"
-            yield $"    -->\n"
-            yield $"</ItemGroup>\n"
+            yield $"  <Import Project=\".paket\\Paket.Restore.targets\" />"
             yield $"</Project>\n"
         }
     let fsProjPath = Path.Combine(folder, $"{projCap}.Backend.fsproj")

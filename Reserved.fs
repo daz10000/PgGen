@@ -840,4 +840,6 @@ let reserved =
     |> Array.choose (fun (n,t) -> if t.StartsWith "reserved" then Some (n.ToLower()) else None)
     |> Set.ofArray
 
-let isReserved (s:string) = reserved.Contains (s.ToLower())
+let reservedFSharp =
+    ["type"] |> Set.ofList
+let isReserved (s:string) = reserved.Contains (s.ToLower()) || reservedFSharp.Contains (s.ToLower())

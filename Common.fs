@@ -12,3 +12,6 @@ let (|Regex|_|) pattern input =
 let toFSharp (s:string) =
     s.Split([|'_'|]) |> Array.map (fun (s:string) -> s.[0].ToString().ToUpper() + s.[1..])
     |> String.concat ""
+
+let titleCase (s:string) =
+    System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s)

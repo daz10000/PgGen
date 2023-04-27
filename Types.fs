@@ -6,12 +6,19 @@ type Db = { DName : string ; Owner : string ; Schemas : Schema list ; Comment : 
 and Schema = { SName : string ; Tables : Table list ; Comment : string option ; Enums : PEnum list}
 
 and ForeignRef = {
+    /// Schema with the referring table/column
     FromSchema : string option
+    /// Table with the referring column
     FromTable : string option
+    /// Cols that make up the reference (see Generate option though which overrides this)
     FromCols : string list
+
+    /// Other table that we are referring to
     ToTable : string
+    /// Schema of other table that we are referring to
     ToSchema : string option
     ToCols : string list
+    /// SHould we auto generate the referring column?
     Generate : bool
     IsNullable : bool
     Name : string option
@@ -30,10 +37,16 @@ and EnumRef = {
     Generate : bool
     IsNullable : bool
     Name : string option
-} and EnumRefAttr =
+}
+
+and EnumRefAttr =
     | EName of string
     | ERComment of string
     | ENullable
+
+and PKey = {
+    Cols : string list
+}
 
 and Table = {
         TName : string
@@ -43,10 +56,28 @@ and Table = {
         FRefs : ForeignRef list
         ERefs : EnumRef list
         Uniques : Unique list
+        PKey : PKey option
 } with
     member x.FSharpName() =
         x.TName.Split([|'_'|])
         |> Array.map (fun (s:string) -> s.[0].ToString().ToUpper() + s.[1..]) |> String.concat ""
+    member x.PKeyName() =
+        match x.PKey with
+        | Some _ -> $"{x.FSharpName()}PKey"
+        | None -> "int"
+    member x.FullCols() =
+        [   yield! x.Cols // regular columns
+            for fk in x.FRefs do // foreign references
+                if fk.Generate then
+                    match fk.Name with
+                    | None ->
+                        yield { CName = $"id_{fk.ToTable}"; CType = ColumnType.Int32; Nullable = false; Array = false ; Comment = None}
+                    | Some
+                        name -> yield { CName = name; CType = ColumnType.Int32; Nullable = false; Array = false ; Comment = None}
+                else
+                    failwithf $"Not implemented,  non int/id foreign keys {fk}"
+        ]
+
 and TableAttr =
     | Comment of string
     | TBD
@@ -107,6 +138,7 @@ type TableBodyItem =
     | Unique of Unique
     | ForeignRef of ForeignRef
     | EnumRef of EnumRef
+    | PKey of PKey
 
 
 

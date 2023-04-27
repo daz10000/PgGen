@@ -53,6 +53,10 @@ let table (name:string) (tableAttr:TableAttr list) (body:TableBodyItem list) =
                             | _ -> ()
             ]
             Comment = comment
+            PKey =
+                body
+                |> List.choose (fun x -> match x with | TableBodyItem.PKey x -> Some x | _ -> None)
+                |> List.tryHead
         }
 
 let schema (name:string) (schemaAttr:SchemaAttr list) (body:SchemaBodyItem list) =
@@ -160,3 +164,6 @@ let enum (name:string) (attrs:EnumRefAttr list) =
             IsNullable = attrs |> List.exists (fun a -> match a with | ENullable -> true | _ -> false)
             Generate = true // only option right now
         }
+
+let pKey (cols:string list) =
+    PKey { Cols = cols }

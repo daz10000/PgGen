@@ -9,6 +9,7 @@
     <Compile Include="Common.fs" />
     <Compile Include="StringBuilder.fs" />
     <Compile Include="Generate.fs" />
+    <Compile Include="CodeStatic.fs" />
     <Compile Include="CodeGen.fs" />
     <Compile Include="Build.fs" />
     <Compile Include="Program.fs" />
