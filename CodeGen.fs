@@ -40,6 +40,15 @@ let emitDomain (proj:string) (s:Schema) =
 
             if needsSystem then
                 yield $"open System\n"
+
+            // Any enums in the schema that need F# types
+            for e in s.Enums do
+                yield $"\n"
+                yield $"type {e.EName |> toFSharp} =\n"
+                for v in e.EValues do
+                    yield $"    | {v |> toFSharp}\n"
+            yield $"\n"
+
             for t in s.Tables do
                 let fsharpName = t.FSharpName()
                 let colsExceptKey = t.Cols |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
@@ -57,6 +66,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $" // -------------------------------------------\n"
                 yield $" // {t.TName}\n"
                 yield $" // -------------------------------------------\n"
+                // CREATE type
                 yield $"type Create{fsharpName} = {{\n"
                 for col in colsExceptKey do
                     let optionModifier =
@@ -69,12 +79,29 @@ let emitDomain (proj:string) (s:Schema) =
                 for fr in t.FRefs do
                     if fr.Generate then
                         let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
-                        yield $"    {colName} : int\n"
+                        let optionModifier =
+                            if fr.IsNullable then
+                                " option"
+                            else
+                                ""
+                        yield $"    {colName} : int{optionModifier}\n"
                     else
                         failwithf "Not implemented - not integer foreign key references"
+                for e in t.ERefs do
+                    if e.Generate then
+                        let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
+                        let optionModifier =
+                            if e.IsNullable then
+                                " option"
+                            else
+                                ""
+                        yield $"    {colName} : {e.EName |> toFSharp}{optionModifier}\n"
+                    else
+                        failwithf "Not implemented - nongenerated enum references"
                 yield $"}}"
                 yield "\n"
 
+                // UPDATE type
                 yield $"type Update{fsharpName} = {{\n"
                 for col in colsExceptKey do
                     let optionModifier =
@@ -93,8 +120,16 @@ let emitDomain (proj:string) (s:Schema) =
                             else
                                 ""
                         yield $"    {colName} : int{optionModifier}\n"
+                for e in t.ERefs do
+                    if e.Generate then
+                        let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
+                        yield $"    {colName} : {e.EName |> toFSharp}\n"
+                    else
+                        failwithf "Not implemented - nongenerated enum references"
                 yield $"}}"
                 yield "\n"
+
+                // Basic full field type
                 yield $"type {fsharpName} = {{\n"
                 for col in t.Cols do
                     let optionModifier =
@@ -113,6 +148,12 @@ let emitDomain (proj:string) (s:Schema) =
                             else
                                 ""
                         yield $"    {colName} : int{optionModifier}\n"
+                for e in t.ERefs do
+                    if e.Generate then
+                        let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
+                        yield $"    {colName} : {e.EName |> toFSharp}\n"
+                    else
+                        failwithf "Not implemented - nongenerated enum references"
                 yield $"}}"
 
                 // Tables that aren't using a simple integer key need a custom primary key type
@@ -141,6 +182,23 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"open {projCap}.Db\n"
             yield $"open {projCap}.Domain.{domain}\n"
             yield $"open Plough.ControlFlow\n"
+
+            // Any enums in the schema that need converter functions to/from F# types
+            for e in s.Enums do
+
+                let fSharpType = e.EName |> toFSharp
+                let fSharpVar = e.EName |> toFSharpLower
+                yield $"let {fSharpVar}ToEnum(v:{fSharpType}) =\n"
+                yield $"    match v with\n"
+                for v in e.EValues do
+                    yield $"    | {v |> toFSharp} -> Db.{s.SName}.Types.{e.EName}.{v}\n"
+                yield $"\n"
+                yield $"let {fSharpVar}FromEnum(e:Db.{s.SName}.Types.{e.EName}) =\n"
+                yield $"    match e with\n"
+                for v in e.EValues do
+                    yield $"    | Db.{s.SName}.Types.{e.EName}.{v} -> {v |> toFSharp}\n"
+                yield $"    | x -> failwithf $\"Impossible {e.EName} enum value {{x}}\"\n"
+                yield $"\n"
 
             for t in s.Tables do
                 let colsExceptKey = t.FullCols() |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
@@ -178,7 +236,13 @@ let emitDomain (proj:string) (s:Schema) =
                                                 $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
                                             else
                                                 $"request.{c.FSharpName()}"
-                                        $"{postgrestify c.CName}={optionalNullHack}"])
+                                        let optionalEnumConversion =
+                                            match c.CType with
+                                            | Enum e ->
+                                                let fSharpVar = e |> toFSharpLower
+                                                $"({optionalNullHack}|> {fSharpVar}ToEnum)"
+                                            | _ -> $"{optionalNullHack}"
+                                        $"{postgrestify c.CName}={optionalEnumConversion}"])
 
                 let fsharpName = t.FSharpName()
                 let returning,readWhereClause,parameters =
@@ -216,7 +280,11 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        return result |> Option.map(fun r->\n"
                 yield $"                                    {{\n"
                 for col in t.FullCols() do
-                    yield $"                                        {col.FSharpName()} = r.{col.CName}\n"
+                    let optionalEnumMap =
+                        match col.CType with
+                        | Enum e -> $" |> {e |> toFSharpLower}FromEnum"
+                        | _ -> ""
+                    yield $"                                        {col.FSharpName()} = r.{col.CName}{optionalEnumMap}\n"
                 yield $"                                    }})\n"
                 yield $"    }}\n"
                 yield $"\n"
@@ -320,6 +388,27 @@ let emitDomain (proj:string) (s:Schema) =
        Domain = domainCode
        ServiceLayer = serviceLayer|}
 
+let generateMasterApiFile(proj:string,d:Db) =
+    stringBuffer {
+        yield $"module {proj |> titleCase}.Api.Server\n"
+        let dbCap = d.DName |> titleCase
+        yield $"open   {dbCap}.Api\n"
+        yield $"\n"
+        yield $"type {dbCap}Api = {{\n"
+        for s in d.Schemas do
+            let schemaCap = titleCase s.SName
+            yield $"    {schemaCap} : {schemaCap}.Api\n"
+        yield $"}}\n"
+
+
+        yield $"let api = {{\n"
+        for s in d.Schemas do
+            let schemaCap = titleCase s.SName
+            yield $"    {schemaCap} = {dbCap}.Domain.{schemaCap}.Api.api\n"
+        yield $"}}"
+
+        yield $"\n"
+    }
 
 let commonFileSource proj =
     stringBuffer {
@@ -382,6 +471,14 @@ let generate (proj:string) (folder:string) (d:Db) =
             let fullApiDef = Path.Combine(folder, apiDefFile)
             printfn $"  generating {fullApiDef|> cleanSlash}"
             File.WriteAllText(fullApiDef, code.ApiDef)
+        // Generate master API file to rule them all
+        let apiFile = Path.Combine("Api",$"{projCap}Api.fs")
+        yield apiFile
+
+        let fullApiFile = Path.Combine(folder, apiFile)
+        printfn $"  generating {fullApiFile|> cleanSlash}"
+        let apiFileContent = generateMasterApiFile(proj,d)
+        File.WriteAllText(fullApiFile,apiFileContent)
 
     ]
     let auxFileNames = [
@@ -404,6 +501,7 @@ let generate (proj:string) (folder:string) (d:Db) =
         File.WriteAllText(fullDbFile, dbFileSource proj)
 
     ]
+
 
     let apiFiles,nonApiFiles = generatedFileNames |> List.partition (fun x -> x.StartsWith("Api/") || x.StartsWith("Api\\"))
 

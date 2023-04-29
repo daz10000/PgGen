@@ -71,11 +71,20 @@ and Table = {
                 if fk.Generate then
                     match fk.Name with
                     | None ->
-                        yield { CName = $"id_{fk.ToTable}"; CType = ColumnType.Int32; Nullable = false; Array = false ; Comment = None}
+                        yield { CName = $"id_{fk.ToTable}"; CType = ColumnType.Int32; Nullable = fk.IsNullable; Array = false ; Comment = None}
                     | Some
-                        name -> yield { CName = name; CType = ColumnType.Int32; Nullable = false; Array = false ; Comment = None}
+                        name -> yield { CName = name; CType = ColumnType.Int32; Nullable = fk.IsNullable; Array = false ; Comment = None}
                 else
                     failwithf $"Not implemented,  non int/id foreign keys {fk}"
+            for e in x.ERefs do
+                if e.Generate then
+                    match e.Name with
+                    | None ->
+                        yield { CName = e.EName; CType = ColumnType.Enum e.EName; Nullable = e.IsNullable; Array = false ; Comment = None}
+                    | Some
+                        name -> yield { CName = name; CType = ColumnType.Enum e.EName; Nullable = e.IsNullable; Array = false ; Comment = None}
+                else
+                    failwithf $"Not implemented,  non  generated enum keys {e}"
         ]
 
 and TableAttr =
@@ -89,6 +98,7 @@ and ColumnType =
     | Int32
     | Timestamp
     | Jsonb
+    | Enum of string
     member x.Sql() =
         match x with
         | Id -> "int"
@@ -97,6 +107,7 @@ and ColumnType =
         | Int32 -> "int"
         | Timestamp -> "timestamptz default now()"
         | Jsonb -> "jsonb"
+        | Enum e -> e
     member x.FSharpType() =
         match x with
         | Id -> "int"
@@ -105,6 +116,7 @@ and ColumnType =
         | Int32 -> "int"
         | Timestamp -> "DateTime"
         | Jsonb -> "string"
+        | Enum e -> e
 
 and Column = {
     CName : string
