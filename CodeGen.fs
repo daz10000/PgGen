@@ -338,7 +338,6 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"module {projCap}.Domain.{domain}.Service\n"
             yield $"\n"
             yield $"open {projCap}.Domain.{domain}\n"
-            // yield $"open Plough.Common\n"
             yield $"open Plough.ControlFlow\n"
             yield $"\n"
             yield $"// PgGen: note - these are simple wrappers for now\n"
@@ -391,9 +390,70 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    Read{tableCap}   : {t.PKeyName()} -> TaskEither<{tableCap} option>\n"
                 yield $"    Update{tableCap} : Update{tableCap} -> TaskEither<unit>\n"
                 yield $"    Delete{tableCap} : {t.PKeyName()} -> TaskEither<string>\n"
-            yield $"}}"
-        }
+            yield $"}}\n"
 
+            // -------------------------------------------
+            // Server api
+            // -------------------------------------------
+            yield $"module Server =\n"
+
+
+            yield $"    let build<'ctx> (api : Api) : ApiServer<'ctx> = subRoute \"/{s.SName}\" <| choose [\n"
+            yield $"        GET >=> choose [\n"
+            for t in s.Tables do
+                let tableCap = t.FSharpName()
+                let canUseGet =
+                    match t.PKey with
+                    | None -> true
+                    | Some _ -> false
+                if canUseGet then
+                    yield $"            routef \"{t.TName}/read/%%i\" (makeJSONHandlerWithArgAsync api.Read{tableCap})\n"
+                yield $"            // route \"{t.TName}/list\" >=> makeJSONHandlerAsync api.List{tableCap} // example for future\n"
+            yield $"        ]\n"
+            yield $"        POST >=> choose [\n"
+            for t in s.Tables do
+                let tableCap = t.FSharpName()
+                let needsPostForGet =
+                    match t.PKey with
+                    | None -> false
+                    | Some _ -> true
+                if needsPostForGet then
+                    yield $"            route \"{t.TName}/read\" >=> makeJSONHandlerWithObjAsync api.Read{tableCap}\n"
+                yield $"            route \"{t.TName}/create\" >=> makeJSONHandlerWithObjAsync api.Create{tableCap}\n"
+                yield $"            route \"{t.TName}/update\" >=> makeJSONHandlerWithObjAsync api.Update{tableCap}\n"
+                yield $"            route \"{t.TName}/delete\" >=> makeJSONHandlerWithObjAsync api.Delete{tableCap}\n"
+            yield $"        ]\n"
+            yield $"    ]\n"
+
+            // -------------------------------------------
+            // Client
+            // -------------------------------------------
+            yield $"type Client(client : ClientBuilder) =\n"
+            yield $"    inherit ClientBuilder(Nested(\"{s.SName}\", client))\n"
+            yield $"\n"
+            for t in s.Tables do
+                let tableCap = t.FSharpName()
+                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{tableCap}> =\n"
+                yield $"        x.Post(\"{t.TName}/create\",doc)\n"
+                yield $"    member x.Read{tableCap}(docId:int) : TaskEither<{tableCap}> =\n"
+                let needsPostForGet =
+                    match t.PKey with
+                    | None -> false
+                    | Some _ -> true
+                if needsPostForGet then
+                    yield $"        x.Post(\"{t.TName}/read\",docId)\n"
+                else
+                    yield $"        x.Get <| $\"{t.TName}/read/{{docId}}\"\n"
+                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<{tableCap}> =\n"
+                yield $"        x.Post(\"{t.TName}/update\",doc)\n"
+
+                yield $"    member x.Delete{tableCap}(docId:int) : TaskEither<string> =\n"
+                yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
+                yield $"    member x.List{tableCap}() : TaskEither<{tableCap}> =\n"
+                yield $"        //x.Get <| $\"{t.TName}/list\"\n"
+                yield $"        failwithf \"Not implemented\"\n"
+            // yield $"        }}\n"
+        }
     {| Storage = storageCode
        ApiWireup = apiWireup
        ApiDef = apiDef
@@ -406,6 +466,7 @@ let generateMasterApiFile(proj:string,d:Db) =
         let dbCap = d.DName |> titleCase
         yield $"open   {dbCap}.Api\n"
         yield $"\n"
+        // Definition of the master Api type with functions
         yield $"type {dbCap}Api = {{\n"
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
@@ -413,6 +474,7 @@ let generateMasterApiFile(proj:string,d:Db) =
         yield $"}}\n"
 
 
+        // Now wire it up with references to the subapis
         yield $"let api = {{\n"
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
