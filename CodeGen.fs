@@ -75,6 +75,10 @@ let emitDomain (proj:string) (s:Schema) =
                         else
                             ""
                     let arrayModifier = if col.Array then " []" else ""
+                    match col.Comment with
+                    | None -> ()
+                    | Some c ->
+                        yield $"\n    /// {c}\n"
                     yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
                 for fr in t.FRefs do
                     if fr.Generate then
@@ -110,6 +114,10 @@ let emitDomain (proj:string) (s:Schema) =
                         else
                             ""
                     let arrayModifier = if col.Array then " []" else ""
+                    match col.Comment with
+                    | None -> ()
+                    | Some c ->
+                        yield $"\n    /// {c}\n"
                     yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
                 for fr in t.FRefs do
                     if fr.Generate then
@@ -138,6 +146,10 @@ let emitDomain (proj:string) (s:Schema) =
                         else
                             ""
                     let arrayModifier = if col.Array then " []" else ""
+                    match col.Comment with
+                    | None -> ()
+                    | Some c ->
+                        yield $"\n    /// {c}\n"
                     yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
                 for fr in t.FRefs do
                     if fr.Generate then
@@ -191,12 +203,12 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"let {fSharpVar}ToEnum(v:{fSharpType}) =\n"
                 yield $"    match v with\n"
                 for v in e.EValues do
-                    yield $"    | {v |> toFSharp} -> Db.{s.SName}.Types.{e.EName}.{v}\n"
+                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{s.SName}.Types.{e.EName}.{v}\n"
                 yield $"\n"
                 yield $"let {fSharpVar}FromEnum(e:Db.{s.SName}.Types.{e.EName}) =\n"
                 yield $"    match e with\n"
                 for v in e.EValues do
-                    yield $"    | Db.{s.SName}.Types.{e.EName}.{v} -> {v |> toFSharp}\n"
+                    yield $"    | Db.{s.SName}.Types.{e.EName}.{v} -> {fSharpType}.{v |> toFSharp}\n"
                 yield $"    | x -> failwithf $\"Impossible {e.EName} enum value {{x}}\"\n"
                 yield $"\n"
 
@@ -231,7 +243,7 @@ let emitDomain (proj:string) (s:Schema) =
                                                     | Int32 -> "-1"
                                                     | String -> "\"\""
                                                     | Timestamp -> "\"0001-01-01\""
-                                                    | Jsonb -> "\"'{}'\""
+                                                    | Jsonb -> "\"{}\""
                                                     | _ -> failwithf $"Not implemented - default value for {c.CType}"
                                                 $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
                                             else
