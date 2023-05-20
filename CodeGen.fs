@@ -460,7 +460,7 @@ let emitDomain (proj:string) (s:Schema) =
        Domain = domainCode
        ServiceLayer = serviceLayer|}
 
-let generateMasterApiFile(proj:string,d:Db) =
+let generateMasterServerApiFile (proj:string) (d:Db) =
     stringBuffer {
         yield $"module {proj |> titleCase}.Api.Server\n"
         let dbCap = d.DName |> titleCase
@@ -480,6 +480,29 @@ let generateMasterApiFile(proj:string,d:Db) =
             let schemaCap = titleCase s.SName
             yield $"    {schemaCap} = {dbCap}.Domain.{schemaCap}.Api.api\n"
         yield $"}}"
+
+        yield $"\n"
+    }
+let generateMasterClientApiFile (proj:string) (d:Db) =
+    let projCap = proj |> titleCase
+    stringBuffer {
+        yield $"namespace {projCap}.Api\n"
+        yield $"open Plough.WebApi.Client\n"
+        let dbCap = d.DName |> titleCase
+        //yield $"open   {dbCap}.Api\n"
+        //yield $"\n"
+        // Definition of the master Api type with functions
+        yield "/// Top level api type definition\n"
+        yield $"type Api = {{\n"
+        for s in d.Schemas do
+            let schemaCap = titleCase s.SName
+            yield $"    {schemaCap} : {schemaCap}.Api\n"
+        yield $"}}\n"
+        yield $"type {projCap} (client : ApiClient) =\n"
+        yield $"    inherit ClientBuilder(Root(\"/api\", client))\n"
+        for s in d.Schemas do
+            let schemaCap = titleCase s.SName
+            yield $"    member x.{schemaCap} = {schemaCap}.Client(x)\n"
 
         yield $"\n"
     }
@@ -545,14 +568,18 @@ let generate (proj:string) (folder:string) (d:Db) =
             let fullApiDef = Path.Combine(folder, apiDefFile)
             printfn $"  generating {fullApiDef|> cleanSlash}"
             File.WriteAllText(fullApiDef, code.ApiDef)
-        // Generate master API file to rule them all
-        let apiFile = Path.Combine("Api",$"{projCap}Api.fs")
+        // Generate master server API file to rule them all
+        let apiFile = Path.Combine("Api",$"{projCap}ServerApi.fs")
         yield apiFile
 
         let fullApiFile = Path.Combine(folder, apiFile)
         printfn $"  generating {fullApiFile|> cleanSlash}"
-        let apiFileContent = generateMasterApiFile(proj,d)
+        let apiFileContent = generateMasterServerApiFile proj d
         File.WriteAllText(fullApiFile,apiFileContent)
+
+        let clientApiFile = Path.Combine(folder,"Api",$"{projCap}ClientApi.fs")
+        let apiFileContent = generateMasterClientApiFile proj d
+        File.WriteAllText(clientApiFile,apiFileContent)
 
     ]
     let auxFileNames = [
@@ -580,6 +607,8 @@ let generate (proj:string) (folder:string) (d:Db) =
     let apiFiles,nonApiFiles = generatedFileNames |> List.partition (fun x -> x.StartsWith("Api/") || x.StartsWith("Api\\"))
 
     let fileNames = auxFileNames @ nonApiFiles @ apiFiles
+    // might be a good idea long term to strongly type these different file types since we need different subsets
+    let domainFiles = nonApiFiles |> List.filter (fun x -> x.EndsWith("Domain.fs"))
 
     // write out an fsproj file with all the individual files in it
     let fsProjContent =
@@ -598,6 +627,32 @@ let generate (proj:string) (folder:string) (d:Db) =
     let fsProjPath = Path.Combine(folder, $"{projCap}.Backend.fsproj")
     printfn $"Generating {fsProjPath|> cleanSlash}"
     File.WriteAllText(fsProjPath, fsProjContent)
+
+    // write out a client api fsproj file with all the individual files in it
+    let apiProjContent =
+        stringBuffer {
+            yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+            yield $"  <PropertyGroup>\n"
+            yield $"    <TargetFramework>net7.0</TargetFramework>\n"
+            yield $"  </PropertyGroup>\n"
+            yield $"  <ItemGroup>\n"
+            for file in domainFiles do
+                yield $"    <Compile Include=\"../{file|> cleanSlash}\" />\n"
+            for file in apiFiles do
+                if file.EndsWith("Wireup.fs") ||
+                    file.EndsWith($"{projCap}ServerApi.fs") then
+                    () // skip these files
+                else
+                    yield $"    <Compile Include=\"{file[4..]|> cleanSlash}\" />\n" // remove Api/ prefix
+            yield $"    <Compile Include=\"{projCap}ClientApi.fs\" />\n"
+            yield $"  </ItemGroup>\n"
+            yield $"  <Import Project=\"..\\.paket\\Paket.Restore.targets\" />"
+            yield $"</Project>\n"
+        }
+    let apiProjPath = Path.Combine(folder,"Api",$"{projCap}Api.fsproj")
+    printfn $"Generating {apiProjPath|> cleanSlash}"
+    File.WriteAllText(apiProjPath, apiProjContent)
+
 
     let compileTimeDbFile = Path.Combine(folder,compileTimeDbFile)
     File.WriteAllText(compileTimeDbFile,$"Host=127.0.0.1;Username=read_write;Password=readwrite;Database={proj};Pooling=true")
