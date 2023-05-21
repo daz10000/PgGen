@@ -10,6 +10,9 @@ Generates SQL for
     - schema creation
     - simple table creation
     - foreign key references, unique constraints
+Generates code fo
+    - CRUD operations
+    - Asp.Net / Plough web api endpoints
 
 ## Example
 
@@ -67,32 +70,16 @@ printfn $"{output}"
 
 ## Todo
 
+- finish CRUD operations
+    - update
+    - delete
+        - soft delete schemes?
+    - list all?
+    - no update fields (e.g. created)
+    - ambient inputs
+        - tenant id 
+        - user id (not from update operations)
+    - dapper / plough query api
+
 - support for indices
 - more field types
-- generation of boiler plate IO code
-- consider parsing a different input format (F# data structures with tags?)
-
-## Random ideas
-- auto type selection (id -> int,  name -> text)
-- like minimal typing (whitespace indentation seems appealing but YAML bad)
-- autonaming fields that refer to other tables
-
-This seems like a good idea from a rapid data entry pov..  Could also allow excel columns for input. 
-```
-MyDb
-    schema1
-        table1
-            id
-            col1
-            col2
-            ->table2  (could generate an id_table2 field pointing to table2.id)
-        table2
-            id
-            col3
-
-    schema2
-        table3
-            col4
-            col5
-        table4
-```

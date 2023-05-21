@@ -344,6 +344,53 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        failwithf \"Not implemented\"\n"
                 yield $"        return \"unimplemented\"\n"
                 yield $"    }}"
+                yield $"\n\n"
+
+                // ====================================================
+                // List code
+                // ====================================================
+                let emitRunPart() =
+                    stringBuffer {
+                        yield $"            return result |> Seq.map(fun r->\n"
+                        yield $"                                    {{\n"
+                        for col in t.FullCols() do
+                            let optionalEnumMap =
+                                match col.CType with
+                                | Enum e -> $" |> {e |> toFSharpLower}FromEnum"
+                                | _ -> ""
+                            yield $"                                        {col.FSharpName()} = r.{col.CName}{optionalEnumMap}\n"
+                        yield $"                                    }}:{fsharpName}) |> Array.ofSeq \n"
+                    }
+                yield $"let list{fsharpName} (row:int option) (batchSize:int option) =\n"
+                yield $"    task {{\n"
+                yield $"        use! conn = Db.openConnectionAsync()\n"
+                yield $"        match row,batchSize with\n"
+                yield $"        | Some row, Some batchSize ->\n"
+                yield $"            use cmd = Db.CreateCommand<\"\"\""
+                yield $"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} LIMIT @batch_size OFFSET @row\n"
+                yield $"                                   \"\"\">(conn)\n"
+                yield $"            let! result = cmd.TaskAsyncExecute(row=row,batch_size=batchSize)\n"
+                yield emitRunPart()
+                yield $"        | None , Some batchSize ->\n"
+                yield $"            use cmd = Db.CreateCommand<\"\"\""
+                yield $"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} LIMIT @batch_size\n"
+                yield $"                                   \"\"\">(conn)\n"
+                yield $"            let! result = cmd.TaskAsyncExecute(batch_size=batchSize)\n"
+                yield emitRunPart()
+                yield $"        | Some row , None ->\n"
+                yield $"            use cmd = Db.CreateCommand<\"\"\""
+                yield $"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} LIMIT @batch_size OFFSET @row\n"
+                yield $"                                   \"\"\">(conn)\n"
+                yield $"            let! result = cmd.TaskAsyncExecute(row=row,batch_size=50)\n"
+                yield emitRunPart()
+                yield $"        | None , None ->\n"
+                yield $"            use cmd = Db.CreateCommand<\"\"\""
+                yield $"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} "
+                yield $"                                   \"\"\">(conn)\n"
+                yield $"            let! result = cmd.TaskAsyncExecute()\n"
+                yield emitRunPart()
+                yield $"    }}\n"
+                yield $"\n"
                 yield $"\n"
         }
     let apiWireup =
@@ -363,6 +410,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    Read{fsharpName} = Service.read{fsharpName}\n"
                 yield $"    Update{fsharpName} = Service.update{fsharpName}\n"
                 yield $"    Delete{fsharpName} = Service.delete{fsharpName}\n"
+                yield $"    List{fsharpName} = Service.list{fsharpName}\n"
             yield "}\n"
 
         }
@@ -371,6 +419,7 @@ let emitDomain (proj:string) (s:Schema) =
         stringBuffer {
             yield $"module {projCap}.Domain.{domain}.Service\n"
             yield $"\n"
+            yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
             yield $"open Plough.ControlFlow\n"
             yield $"\n"
@@ -401,6 +450,12 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        return! Storage.delete{tableCap} request\n"
                 yield $"    }}\n"
                 yield $"\n"
+
+                yield $"let list{tableCap} (batchOffset:BatchOffset) =\n"
+                yield $"    taskEither {{\n"
+                yield $"        return! Storage.list{tableCap} batchOffset.Offset batchOffset.BatchSize\n"
+                yield $"    }}\n"
+                yield $"\n"
         }
     let apiDef =
         stringBuffer {
@@ -410,6 +465,7 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"open Plough.WebApi.Client\n"
             yield $"open Plough.WebApi.Server\n"
             yield $"open Plough.WebApi.Server.Plain\n"
+            yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
 
             yield $"\n"
@@ -424,6 +480,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    Read{tableCap}   : {t.PKeyName()} -> TaskEither<{tableCap} option>\n"
                 yield $"    Update{tableCap} : Update{tableCap} -> TaskEither<unit>\n"
                 yield $"    Delete{tableCap} : {t.PKeyName()} -> TaskEither<string>\n"
+                yield $"    List{tableCap} : BatchOffset -> TaskEither<{tableCap} []>\n"
             yield $"}}\n"
 
             // -------------------------------------------
@@ -441,8 +498,8 @@ let emitDomain (proj:string) (s:Schema) =
                     | None -> true
                     | Some _ -> false
                 if canUseGet then
-                    yield $"            routef \"{t.TName}/read/%%i\" (makeJSONHandlerWithArgAsync api.Read{tableCap})\n"
-                yield $"            // route \"{t.TName}/list\" >=> makeJSONHandlerAsync api.List{tableCap} // example for future\n"
+                    yield $"            routef \"/{t.TName}/read/%%i\" (makeJSONHandlerWithArgAsync api.Read{tableCap})\n"
+                yield $"            route \"/{t.TName}/list\" >=> makeJSONHandlerWithQueryParamAsync api.List{tableCap} \n"
             yield $"        ]\n"
             yield $"        POST >=> choose [\n"
             for t in s.Tables do
@@ -452,10 +509,10 @@ let emitDomain (proj:string) (s:Schema) =
                     | None -> false
                     | Some _ -> true
                 if needsPostForGet then
-                    yield $"            route \"{t.TName}/read\" >=> makeJSONHandlerWithObjAsync api.Read{tableCap}\n"
-                yield $"            route \"{t.TName}/create\" >=> makeJSONHandlerWithObjAsync api.Create{tableCap}\n"
-                yield $"            route \"{t.TName}/update\" >=> makeJSONHandlerWithObjAsync api.Update{tableCap}\n"
-                yield $"            route \"{t.TName}/delete\" >=> makeJSONHandlerWithObjAsync api.Delete{tableCap}\n"
+                    yield $"            route \"/{t.TName}/read\" >=> makeJSONHandlerWithObjAsync api.Read{tableCap}\n"
+                yield $"            route \"/{t.TName}/create\" >=> makeJSONHandlerWithObjAsync api.Create{tableCap}\n"
+                yield $"            route \"/{t.TName}/update\" >=> makeJSONHandlerWithObjAsync api.Update{tableCap}\n"
+                yield $"            route \"/{t.TName}/delete\" >=> makeJSONHandlerWithObjAsync api.Delete{tableCap}\n"
             yield $"        ]\n"
             yield $"    ]\n"
 
@@ -483,9 +540,13 @@ let emitDomain (proj:string) (s:Schema) =
 
                 yield $"    member x.Delete{tableCap}(docId:int) : TaskEither<string> =\n"
                 yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
-                yield $"    member x.List{tableCap}() : TaskEither<{tableCap}> =\n"
-                yield $"        //x.Get <| $\"{t.TName}/list\"\n"
-                yield $"        failwithf \"Not implemented\"\n"
+                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap}> =\n"
+                yield $"        match offset,batchSize with\n"
+                yield $"                 | Some o,Some b -> $\"{t.TName}/list?offset={{offset}}&batch={{batchSize}}\"\n"
+                yield $"                 | None ,Some b -> $\"{t.TName}/list?batch={{batchSize}}\"\n"
+                yield $"                 | Some o,None -> $\"{t.TName}/list?offset={{offset}}\"\n"
+                yield $"                 | None ,None -> $\"{t.TName}/list\"\n"
+                yield $"        |> x.Get\n"
             // yield $"        }}\n"
         }
     {| Storage = storageCode
@@ -539,16 +600,6 @@ let generateMasterClientApiFile (proj:string) (d:Db) =
             yield $"    member x.{schemaCap} = {schemaCap}.Client(x)\n"
 
         yield $"\n"
-    }
-
-let commonFileSource proj =
-    stringBuffer {
-        yield $"module {proj |> titleCase}.Common\n"
-        yield $"\n"
-        yield $"open Plough.ControlFlow\n"
-        yield $"open System\n"
-        yield $"\n"
-        yield $"// Shared data structures like User definitions go here\n"
     }
 
 

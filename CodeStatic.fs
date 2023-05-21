@@ -104,3 +104,18 @@ let dotnetToolsJson = """{
     }
   }
 }"""
+
+let commonFileSource proj =
+    stringBuffer {
+        yield $"module {proj |> titleCase}.Common\n"
+        yield $"\n"
+        yield $"open Plough.ControlFlow\n"
+        yield $"open System\n"
+        yield $"\n"
+        yield $"[<CLIMutable>]\n"
+        yield $"type BatchOffset = {{\n"
+        yield $"    Offset : int option\n"
+        yield $"    BatchSize : int option}}\n"
+
+        yield $"// Shared data structures like User definitions go here\n"
+    }
