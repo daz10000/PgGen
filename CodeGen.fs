@@ -172,7 +172,7 @@ let emitDomain (proj:string) (s:Schema) =
                 match t.PKey with
                 | Some pk ->
                     yield $"\n"
-                    yield $"type {t.PKeyName()}= {{\n"
+                    yield $"type {t.PKeyTypeName()}= {{\n"
                     for colName in pk.Cols do
                         let c =
                             match availCols|> List.tryFind (fun c -> c.Name = colName) with
@@ -286,7 +286,7 @@ let emitDomain (proj:string) (s:Schema) =
                     yield $"        return () // complex primary key, no return value\n"
                 yield $"    }}\n"
                 yield $"\n"
-                yield $"let read{fsharpName} (request:{t.PKeyName()}) : Task<{fsharpName} option>=\n"
+                yield $"let read{fsharpName} (request:{t.PKeyTypeName()}) : Task<{fsharpName} option>=\n"
                 yield $"    task {{\n"
                 yield $"        use! conn = Db.openConnectionAsync()\n"
                 yield $"        use cmd = Db.CreateCommand<\"\"\""
@@ -339,7 +339,7 @@ let emitDomain (proj:string) (s:Schema) =
                 // ====================================================
                 // Delete code
                 // ====================================================
-                yield $"let delete{fsharpName} (id:{t.PKeyName()}) =\n"
+                yield $"let delete{fsharpName} (id:{t.PKeyTypeName()}) =\n"
                 yield $"    task {{\n"
                 yield $"        failwithf \"Not implemented\"\n"
                 yield $"        return \"unimplemented\"\n"
@@ -433,7 +433,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    }}\n"
                 yield $"\n"
 
-                yield $"let read{tableCap} (request:{t.PKeyName()}) =\n"
+                yield $"let read{tableCap} (request:{t.PKeyTypeName()}) =\n"
                 yield $"    taskEither {{\n"
                 yield $"        return! Storage.read{tableCap} request\n"
                 yield $"    }}\n"
@@ -445,7 +445,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    }}\n"
                 yield $"\n"
 
-                yield $"let delete{tableCap} (request:{t.PKeyName()}) =\n"
+                yield $"let delete{tableCap} (request:{t.PKeyTypeName()}) =\n"
                 yield $"    taskEither {{\n"
                 yield $"        return! Storage.delete{tableCap} request\n"
                 yield $"    }}\n"
@@ -474,12 +474,12 @@ let emitDomain (proj:string) (s:Schema) =
                 let tableCap = t.FSharpName()
                 match t.PKey with
                 | None ->
-                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<{t.PKeyName()}>\n"
+                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<{t.PKeyTypeName()}>\n"
                 | Some _ ->
                     yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<unit>\n"
-                yield $"    Read{tableCap}   : {t.PKeyName()} -> TaskEither<{tableCap} option>\n"
+                yield $"    Read{tableCap}   : {t.PKeyTypeName()} -> TaskEither<{tableCap} option>\n"
                 yield $"    Update{tableCap} : Update{tableCap} -> TaskEither<unit>\n"
-                yield $"    Delete{tableCap} : {t.PKeyName()} -> TaskEither<string>\n"
+                yield $"    Delete{tableCap} : {t.PKeyTypeName()} -> TaskEither<string>\n"
                 yield $"    List{tableCap} : BatchOffset -> TaskEither<{tableCap} []>\n"
             yield $"}}\n"
 
@@ -524,9 +524,13 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"\n"
             for t in s.Tables do
                 let tableCap = t.FSharpName()
-                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{tableCap}> =\n"
+                let createReturnType =
+                    match t.PKey with
+                    | None -> t.PKeyTypeName()
+                    | Some _ -> "unit"
+                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{createReturnType}> =\n"
                 yield $"        x.Post(\"{t.TName}/create\",doc)\n"
-                yield $"    member x.Read{tableCap}(docId:int) : TaskEither<{tableCap}> =\n"
+                yield $"    member x.Read{tableCap}(docId:int) : TaskEither<{tableCap} option> =\n"
                 let needsPostForGet =
                     match t.PKey with
                     | None -> false
@@ -535,7 +539,7 @@ let emitDomain (proj:string) (s:Schema) =
                     yield $"        x.Post(\"{t.TName}/read\",docId)\n"
                 else
                     yield $"        x.Get <| $\"{t.TName}/read/{{docId}}\"\n"
-                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<{tableCap}> =\n"
+                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<unit> =\n"
                 yield $"        x.Post(\"{t.TName}/update\",doc)\n"
 
                 yield $"    member x.Delete{tableCap}(docId:int) : TaskEither<string> =\n"

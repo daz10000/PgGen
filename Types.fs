@@ -61,7 +61,7 @@ and Table = {
     member x.FSharpName() =
         x.TName.Split([|'_'|])
         |> Array.map (fun (s:string) -> s.[0].ToString().ToUpper() + s.[1..]) |> String.concat ""
-    member x.PKeyName() =
+    member x.PKeyTypeName() =
         match x.PKey with
         | Some _ -> $"{x.FSharpName()}PKey"
         | None -> "int"
