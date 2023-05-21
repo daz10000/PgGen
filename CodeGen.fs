@@ -540,7 +540,7 @@ let emitDomain (proj:string) (s:Schema) =
 
                 yield $"    member x.Delete{tableCap}(docId:int) : TaskEither<string> =\n"
                 yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
-                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap}> =\n"
+                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap} []> =\n"
                 yield $"        match offset,batchSize with\n"
                 yield $"                 | Some o,Some b -> $\"{t.TName}/list?offset={{offset}}&batch={{batchSize}}\"\n"
                 yield $"                 | None ,Some b -> $\"{t.TName}/list?batch={{batchSize}}\"\n"
@@ -721,6 +721,7 @@ let generate (proj:string) (folder:string) (d:Db) =
             yield $"    <TargetFramework>net7.0</TargetFramework>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
+            yield $"    <Compile Include=\"../Common/Common.fs\" />\n"
             for file in domainFiles do
                 yield $"    <Compile Include=\"../{file|> cleanSlash}\" />\n"
             for file in apiFiles do
