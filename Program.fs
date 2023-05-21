@@ -42,8 +42,8 @@ let proteins =
                     col "genes" Jsonb [Array]
                     col "features" Jsonb [Array]
 
-                    col "created" Timestamp []
-                    col "updated" Timestamp []
+                    col "created" Timestamp [ CUpdate Never]
+                    col "updated" Timestamp [ CUpdate Now]
                     frefId "uniprot_entry" [] // associated uniprot_entry
                 ]
 
@@ -52,7 +52,7 @@ let proteins =
                     col "data" Jsonb []
                     frefId "uniprot_entry" [] // associated uniprot_entry
                     frefId "ec_group"  [] // breaking denorm for convenience here
-                    col "created" Timestamp []
+                    col "created" Timestamp [CUpdate Never]
                 ]
 
                 table "uniprot_keyword" [Comment "json structured keywords attached to a uniprot entry"] [
@@ -60,7 +60,7 @@ let proteins =
                     col "data" Jsonb []
                     frefId "uniprot_entry" [] // associated uniprot_entry
                     frefId "ec_group"  [] // breaking denorm for convenience here
-                    col "created" Timestamp []
+                    col "created" Timestamp [CUpdate Never]
                 ]
 
                 table "uniprot_ref" [Comment "json structured keywords attached to a uniprot entry"] [
@@ -68,7 +68,7 @@ let proteins =
                     col "data" Jsonb []
                     frefId "uniprot_entry" [] // associated uniprot_entry
                     frefId "ec_group"  [] // breaking denorm for convenience here
-                    col "created" Timestamp []
+                    col "created" Timestamp [CUpdate Never]
                 ]
 
                 table "uniprot_gene" [Comment "json structured gene data attached to a uniprot entry"] [
@@ -76,7 +76,7 @@ let proteins =
                     col "data" Jsonb []
                     frefId "uniprot_entry" [] // associated uniprot_entry
                     frefId "ec_group"  [] // breaking denorm for convenience here
-                    col "created" Timestamp []
+                    col "created" Timestamp [CUpdate Never]
                 ]
 
                 table "uniprot_feature" [Comment "json structured features attached to a uniprot entry"] [
@@ -84,7 +84,7 @@ let proteins =
                     col "data" Jsonb []
                     frefId "uniprot_entry" [ FComment "associated uniprot_entry"]
                     frefId "ec_group"  [ FComment "breaking denorm for convenience here"]
-                    col "created" Timestamp []
+                    col "created" Timestamp [CUpdate Never]
                 ]
 
                 table "uniprot_rxn" [Comment "text description of reactions and references to other rxn dbs"] [

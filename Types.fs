@@ -139,10 +139,15 @@ type EAttr =
     | Member of string
     | EComment of string
 
+type CUpdateStrategy =
+    | Never
+    | Now
+
 type ColumnMatters =
     | Nullable
     | Array
     | CComment of string
+    | CUpdate of CUpdateStrategy
 
 /// Things in the table itself (cols et al)
 type TableBodyItem =

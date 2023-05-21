@@ -107,7 +107,7 @@ let emitDomain (proj:string) (s:Schema) =
 
                 // UPDATE type
                 yield $"type Update{fsharpName} = {{\n"
-                for col in colsExceptKey do
+                for col in t.Cols do // include key since we need to know what to update
                     let optionModifier =
                         if col.Nullable then
                             " option"
@@ -215,8 +215,8 @@ let emitDomain (proj:string) (s:Schema) =
             for t in s.Tables do
                 let colsExceptKey = t.FullCols() |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
                 let colNamesExceptKey = String.Join(",",[for c in colsExceptKey  -> postgrestify c.CName])
-                let placeHolders =
-                    String.Join(",",[for c in colsExceptKey  ->
+                let placeHolderDefs =
+                    [for c in colsExceptKey  ->
                                             if c.Nullable then
                                                 let defaultVPostgres =
                                                     match c.CType with
@@ -225,14 +225,15 @@ let emitDomain (proj:string) (s:Schema) =
                                                     | Timestamp -> "'0001-01-01'"
                                                     | Jsonb -> "'{}'::jsonb"
                                                     | _ -> failwithf $"Not implemented - default value for {c.CType}"
-                                                $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)"
+                                                {| CName = c.CName ; CValue = $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)" |}
                                             else
-                                                $"@{c.CName}"
+                                                {| CName = c.CName ; CValue = $"@{c.CName}" |}
                                     ]
-                    )
+                let insertPlaceHolders = String.Join(",",[for c in placeHolderDefs  -> c.CValue])
+                let updatePlaceHolders = String.Join(",",[for c in placeHolderDefs  -> $"{c.CName}={c.CValue}"])
                 let fullPostgresCols =
                     String.Join(",",[for c in t.FullCols()  -> postgrestify c.CName])
-                let assignedValues =
+                let nonPKParametersForCall =
                     String.Join(",",[for c in colsExceptKey  ->
                                         let optionalNullHack =
                                             if c.Nullable then
@@ -268,13 +269,16 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"// {fsharpName} CRUD operations\n"
                 yield $"// -------------------------------------------\n"
                 yield $"\n"
+                // ====================================================
+                // Create code
+                // ====================================================
                 yield $"let create{fsharpName} (request:Create{fsharpName}) =\n"
                 yield $"    task {{\n"
                 yield $"        use! conn = Db.openConnectionAsync()\n"
                 yield $"        use cmd = Db.CreateCommand<\"\"\"INSERT INTO {s.SName}.{t.TName} (\n"
-                yield $"            {colNamesExceptKey}) VALUES({placeHolders}) {returning}\n"
+                yield $"            {colNamesExceptKey}) \n                    VALUES({insertPlaceHolders}) {returning}\n"
                 yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let newId = cmd.Execute({assignedValues})\n"
+                yield $"        let newId = cmd.Execute({nonPKParametersForCall})\n"
                 match t.PKey with
                 | None ->
                     yield $"        return newId.Value // returns option but should be reliable\n"
@@ -300,11 +304,41 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"                                    }})\n"
                 yield $"    }}\n"
                 yield $"\n"
-                yield $"let update{fsharpName} (x:Update{fsharpName}) =\n"
+
+
+                // ====================================================
+                // Update code
+                // ====================================================
+                yield $"let update{fsharpName} (request:Update{fsharpName}) =\n"
                 yield $"    task {{\n"
-                yield $"        failwithf \"Not implemented\"\n"
-                yield $"    }}"
+                yield $"        use! conn = Db.openConnectionAsync()\n"
+                yield $"        use cmd = Db.CreateCommand<\"\"\"\n"
+                yield $"          UPDATE {s.SName}.{t.TName} \n"
+                yield $"              SET\n"
+
+                let updateParameters =
+                    String.Join(",",
+                        [   yield nonPKParametersForCall // already have these from insert
+                            match t.PKey with // updates also need the primary key columns
+                            | None ->
+                                yield $"id=request.Id"
+                            | Some cols ->
+                                // already covered I think by the nonPKParametersForCall
+                                //for col in cols.Cols do
+                                //    yield $"{col}=request.{col}"
+                                ()
+                        ])
+
+                yield $"                {updatePlaceHolders}\n"
+                yield $"          WHERE {readWhereClause}\n"
+                yield $"                                   \"\"\",SingleRow=true>(conn)\n"
+                yield $"        let result = cmd.Execute({updateParameters})\n"
+                yield $"        return ()\n"
+                yield $"    }}\n"
                 yield $"\n"
+                // ====================================================
+                // Delete code
+                // ====================================================
                 yield $"let delete{fsharpName} (id:{t.PKeyName()}) =\n"
                 yield $"    task {{\n"
                 yield $"        failwithf \"Not implemented\"\n"
@@ -340,7 +374,7 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"open {projCap}.Domain.{domain}\n"
             yield $"open Plough.ControlFlow\n"
             yield $"\n"
-            yield $"// PgGen: note - these are simple wrappers for now\n"
+            yield $"// PgGen: note - these are simple wrappers for now but business logic / transactions / multiple IO calls can be handled here\n"
             for t in s.Tables do
                 let tableCap = t.FSharpName()
                 yield $"// -------------------------------------------\n"
