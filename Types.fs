@@ -98,6 +98,8 @@ and ColumnType =
     | Int32
     | Timestamp
     | Jsonb
+    | Float
+    | Decimal
     | Enum of string
     member x.Sql() =
         match x with
@@ -107,6 +109,8 @@ and ColumnType =
         | Int32 -> "int"
         | Timestamp -> "timestamptz default now()"
         | Jsonb -> "jsonb"
+        | Float -> "float"
+        | Decimal -> "decimal"
         | Enum e -> e
     member x.FSharpType() =
         match x with
@@ -116,6 +120,8 @@ and ColumnType =
         | Int32 -> "int"
         | Timestamp -> "DateTime"
         | Jsonb -> "string"
+        | Float -> "float"
+        | Decimal -> "decimal"
         | Enum e -> e
 
 and Column = {
