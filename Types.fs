@@ -93,17 +93,20 @@ and TableAttr =
 
 and ColumnType =
     | Id
+    | Id64
     | String
     | Bool
     | Int32
     | Timestamp
     | Jsonb
     | Float
+    | Guid
     | Decimal
     | Enum of string
     member x.Sql() =
         match x with
         | Id -> "int"
+        | Id64 -> "bigint"
         | String -> "text"
         | Bool -> "boolean"
         | Int32 -> "int"
@@ -111,10 +114,12 @@ and ColumnType =
         | Jsonb -> "jsonb"
         | Float -> "float"
         | Decimal -> "decimal"
+        | Guid -> "uuid"
         | Enum e -> e
     member x.FSharpType() =
         match x with
         | Id -> "int"
+        | Id64 -> "int64"
         | String -> "string"
         | Bool -> "bool"
         | Int32 -> "int"
@@ -122,6 +127,7 @@ and ColumnType =
         | Jsonb -> "string"
         | Float -> "float"
         | Decimal -> "decimal"
+        | Guid -> "guid"
         | Enum e -> e
 
 and Column = {
