@@ -101,6 +101,7 @@ and ColumnType =
     | Jsonb
     | Float
     | Guid
+    | Blob
     | Decimal
     | Enum of string
     member x.Sql() =
@@ -114,6 +115,7 @@ and ColumnType =
         | Jsonb -> "jsonb"
         | Float -> "float"
         | Decimal -> "decimal"
+        | Blob -> "bytea"
         | Guid -> "uuid"
         | Enum e -> e
     member x.FSharpType() =
@@ -126,8 +128,9 @@ and ColumnType =
         | Timestamp -> "DateTime"
         | Jsonb -> "string"
         | Float -> "float"
+        | Blob -> "byte[]"
         | Decimal -> "decimal"
-        | Guid -> "guid"
+        | Guid -> "Guid"
         | Enum e -> e
 
 and Column = {

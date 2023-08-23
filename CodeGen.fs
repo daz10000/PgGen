@@ -563,10 +563,11 @@ let generateMasterServerApiFile (proj:string) (d:Db) =
     stringBuffer {
         yield $"module {proj |> titleCase}.Api.Server\n"
         let dbCap = d.DName |> titleCase
-        yield $"open   {dbCap}.Api\n"
+        let projCap = proj |> titleCase
+        yield $"open   {projCap}.Api\n"
         yield $"\n"
         // Definition of the master Api type with functions
-        yield $"type {dbCap}Api = {{\n"
+        yield $"type {projCap}Api = {{\n"
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
             yield $"    {schemaCap} : {schemaCap}.Api\n"
@@ -577,7 +578,7 @@ let generateMasterServerApiFile (proj:string) (d:Db) =
         yield $"let api = {{\n"
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
-            yield $"    {schemaCap} = {dbCap}.Domain.{schemaCap}.Api.api\n"
+            yield $"    {schemaCap} = {projCap}.Domain.{schemaCap}.Api.api\n"
         yield $"}}"
 
         yield $"\n"
@@ -745,7 +746,7 @@ let generate (proj:string) (folder:string) (d:Db) =
 
 
     let compileTimeDbFile = Path.Combine(folder,compileTimeDbFile)
-    File.WriteAllText(compileTimeDbFile,$"Host=127.0.0.1;Username=read_write;Password=readwrite;Database={proj};Pooling=true")
+    File.WriteAllText(compileTimeDbFile,$"Host=127.0.0.1;Username=read_write;Password=readwrite;Database={d.DName};Pooling=true")
 
     let paketDepsFile = Path.Combine(folder, "paket.dependencies")
     let paketRefsFile = Path.Combine(folder, "paket.references")
