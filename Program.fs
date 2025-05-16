@@ -1,5 +1,4 @@
 ﻿module PgGen.Main
-
 open Build
 
 let proteins =
@@ -106,6 +105,15 @@ let proteins =
             ]
     ]
 
-let output = Generate.emitDatabase proteins
+if false then
+    let output = Generate.emitDatabase proteins
+    printfn $"{output}"
 
-printfn $"{output}"
+// Connect and dump a schema
+
+let connectionString = 
+    System.IO.File.ReadAllText("connection_string.txt")
+let schema = ExtractSchema.extractSchema connectionString
+let output = ExtractSchema.generateSchema schema
+System.IO.File.WriteAllText("schema_output.fs", output)
+
