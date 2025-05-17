@@ -40,8 +40,11 @@ and EnumRef = {
 }
 
 and EnumRefAttr =
+    /// EName is the name of the enum in the database
     | EName of string
+    /// ERComment is the comment for the enum reference
     | ERComment of string
+    /// Mark the enum column as nullable
     | ENullable
 
 and PKey = {

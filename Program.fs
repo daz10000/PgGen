@@ -1,5 +1,6 @@
 ﻿module PgGen.Main
 open Build
+open PgGen.ExtractSchema
 
 let proteins =
     db "proteins" [ Owner "read_write" ] [
@@ -111,9 +112,21 @@ if false then
 
 // Connect and dump a schema
 
+let verbose = true // Set to true to enable verbose output
+
 let connectionString = 
     System.IO.File.ReadAllText("connection_string.txt")
-let schema = ExtractSchema.extractSchema connectionString
-let output = ExtractSchema.generateSchema schema
+let schema, enumMap = ExtractSchema.extractSchemaAndEnums connectionString
+
+if verbose then
+    printfn "Extracted schema columns:"
+    for col,_ in schema do
+        printfn "  Schema: %s, Table: %s, Column: %s, DataType: %s, IsNullable: %s" col.Schema col.Table col.Column col.DataType col.IsNullable
+    printfn "\nExtracted enums:"
+    for KeyValue(enumName, values) in enumMap do
+        printfn "  Enum: %s -> [%s]" enumName (String.concat ", " values)
+    printfn "\n--- Re-emitted Schema ---\n"
+
+let output = ExtractSchema.generateSchema (schema, enumMap)
 System.IO.File.WriteAllText("schema_output.fs", output)
 
