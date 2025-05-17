@@ -11,10 +11,20 @@ type ColumnInfo = {
     IsNullable: string
 }
 
+type ForeignKeyInfo = {
+    Schema: string
+    Table: string
+    Column: string
+    RefSchema: string option
+    RefTable: string
+    RefColumn: string
+}
+
 type ExtractedSchema = {
     ColumnsWithUdt: (ColumnInfo * string option) list
     EnumMap: Map<string, string list>
     PkSeqCols: (string * string * string) list
+    ForeignKeys: ForeignKeyInfo list
 }
 
 /// Extracts the schema, enum definitions, and primary key/sequence info from a PostgreSQL database connection string.
@@ -88,7 +98,41 @@ let extractSchemaAndEnums (connectionString: string) =
                 enumType, values
             )
             |> Map.ofList
-    { ColumnsWithUdt = columnsWithUdt; EnumMap = enumMap; PkSeqCols = pkSeqCols }
+    // Foreign key extraction
+    let foreignKeys =
+        use conn = new NpgsqlConnection(connectionString)
+        conn.Open()
+        use fkCmd = new NpgsqlCommand("""
+            SELECT
+                kcu.table_schema, kcu.table_name, kcu.column_name,
+                ccu.table_schema AS foreign_table_schema,
+                ccu.table_name AS foreign_table_name,
+                ccu.column_name AS foreign_column_name
+            FROM information_schema.key_column_usage AS kcu
+            JOIN information_schema.referential_constraints AS rc
+                ON kcu.constraint_catalog = rc.constraint_catalog
+                AND kcu.constraint_schema = rc.constraint_schema
+                AND kcu.constraint_name = rc.constraint_name
+            JOIN information_schema.constraint_column_usage AS ccu
+                ON rc.unique_constraint_catalog = ccu.constraint_catalog
+                AND rc.unique_constraint_schema = ccu.constraint_schema
+                AND rc.unique_constraint_name = ccu.constraint_name
+            WHERE kcu.table_schema NOT IN ('pg_catalog', 'information_schema')
+        """, conn)
+        use fkReader = fkCmd.ExecuteReader()
+        [ while fkReader.Read() do
+            yield {
+                Schema = fkReader.GetString(0)
+                Table = fkReader.GetString(1)
+                Column = fkReader.GetString(2)
+                RefSchema =
+                    let s = fkReader.GetString(3)
+                    if s = "" then None else Some s
+                RefTable = fkReader.GetString(4)
+                RefColumn = fkReader.GetString(5)
+            }
+        ]
+    { ColumnsWithUdt = columnsWithUdt; EnumMap = enumMap; PkSeqCols = pkSeqCols; ForeignKeys = foreignKeys }
 
 /// Generates a schema definition (as F# code or other format) from the extracted schema and enums.
 let generateSchema (schema: ExtractedSchema) =
@@ -112,12 +156,22 @@ let generateSchema (schema: ExtractedSchema) =
                     tableColumns
                     |> List.map (fun (c, udtNameOpt) ->
                         let isPkSeq = schema.PkSeqCols |> List.exists (fun (s, t, col) -> s = c.Schema && t = c.Table && col = c.Column)
+                        let fkOpt = schema.ForeignKeys |> List.tryFind (fun fk ->
+                            fk.Schema = c.Schema && fk.Table = c.Table && fk.Column = c.Column
+                        )
                         let colType =
                             if c.DataType = "USER-DEFINED" then
                                 match udtNameOpt with
                                 | Some udtName when udtName = c.Column -> "enum []"
                                 | Some udtName -> sprintf "enum [EName %s]" (quote udtName)
                                 | None -> "enum []"
+                            elif Option.isSome fkOpt then
+                                let fk = fkOpt.Value
+                                let refTable =
+                                    match fk.RefSchema with
+                                    | Some s when s <> c.Schema -> sprintf "%s.%s" s fk.RefTable
+                                    | _ -> fk.RefTable
+                                sprintf "frefId %s []" (quote refTable)
                             elif isPkSeq then
                                 "Id []"
                             else
