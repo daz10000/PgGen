@@ -116,17 +116,17 @@ let verbose = true // Set to true to enable verbose output
 
 let connectionString = 
     System.IO.File.ReadAllText("connection_string.txt")
-let schema, enumMap = ExtractSchema.extractSchemaAndEnums connectionString
+let schemaInfo = ExtractSchema.extractSchemaAndEnums connectionString
 
 if verbose then
     printfn "Extracted schema columns:"
-    for col,_ in schema do
+    for col,_ in schemaInfo.ColumnsWithUdt do
         printfn "  Schema: %s, Table: %s, Column: %s, DataType: %s, IsNullable: %s" col.Schema col.Table col.Column col.DataType col.IsNullable
     printfn "\nExtracted enums:"
-    for KeyValue(enumName, values) in enumMap do
+    for KeyValue(enumName, values) in schemaInfo.EnumMap do
         printfn "  Enum: %s -> [%s]" enumName (String.concat ", " values)
     printfn "\n--- Re-emitted Schema ---\n"
 
-let output = ExtractSchema.generateSchema (schema, enumMap)
+let output = ExtractSchema.generateSchema schemaInfo
 System.IO.File.WriteAllText("schema_output.fs", output)
 
