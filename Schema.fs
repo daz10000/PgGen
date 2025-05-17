@@ -175,7 +175,11 @@ let generateSchema (schema: ExtractedSchema) =
                             elif isPkSeq then
                                 "Id []"
                             else
-                                sprintf "%s [%s]" c.DataType (if c.IsNullable = "YES" then "Nullable" else "")
+                                // Only add Nullable if column is nullable
+                                if c.IsNullable.Trim().ToUpperInvariant() = "YES" then
+                                    sprintf "%s [Nullable]" c.DataType
+                                else
+                                    sprintf "%s []" c.DataType
                         sprintf "col %s %s" (quote c.Column) colType
                     )
                     |> String.concat "\n        "
