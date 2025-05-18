@@ -136,6 +136,10 @@ let extractSchemaAndEnums (connectionString: string) =
 
 /// Generates a schema definition (as F# code or other format) from the extracted schema and enums.
 let generateSchema (schema: ExtractedSchema) =
+    let header = """#r "bin/Debug/net9.0/PgGen.dll"
+open PgGen
+open PgGen.Build
+"""
     let quote s = sprintf "\"%s\"" s
     let enumDefs =
         schema.EnumMap
@@ -145,51 +149,66 @@ let generateSchema (schema: ExtractedSchema) =
             sprintf "enumDef %s [ %s ]" (quote enumType) members
         )
         |> String.concat "\n    "
-    schema.ColumnsWithUdt
-    |> List.groupBy (fun (c, _) -> c.Schema)
-    |> List.map (fun (schemaName, columns) ->
-        let tables =
-            columns
-            |> List.groupBy (fun (c, _) -> c.Table)
-            |> List.map (fun (tableName, tableColumns) ->
-                let colLines =
-                    tableColumns
-                    |> List.map (fun (c, udtNameOpt) ->
-                        let isPkSeq = schema.PkSeqCols |> List.exists (fun (s, t, col) -> s = c.Schema && t = c.Table && col = c.Column)
-                        let fkOpt = schema.ForeignKeys |> List.tryFind (fun fk ->
-                            fk.Schema = c.Schema && fk.Table = c.Table && fk.Column = c.Column
-                        )
-                        let colType =
-                            if c.DataType = "USER-DEFINED" then
-                                match udtNameOpt with
-                                | Some udtName when udtName = c.Column -> "enum []"
-                                | Some udtName -> sprintf "enum [EName %s]" (quote udtName)
-                                | None -> "enum []"
-                            elif Option.isSome fkOpt then
-                                let fk = fkOpt.Value
-                                let refTable =
-                                    match fk.RefSchema with
-                                    | Some s when s <> c.Schema -> sprintf "%s.%s" s fk.RefTable
-                                    | _ -> fk.RefTable
-                                sprintf "frefId %s []" (quote refTable)
-                            elif isPkSeq then
-                                "Id []"
-                            else
-                                // Only add Nullable if column is nullable
-                                if c.IsNullable.Trim().ToUpperInvariant() = "YES" then
-                                    sprintf "%s [Nullable]" c.DataType
+    let body =
+        schema.ColumnsWithUdt
+        |> List.groupBy (fun (c, _) -> c.Schema)
+        |> List.map (fun (schemaName, columns) ->
+            let tables =
+                columns
+                |> List.groupBy (fun (c, _) -> c.Table)
+                |> List.map (fun (tableName, tableColumns) ->
+                    let colLines =
+                        tableColumns
+                        |> List.map (fun (c, udtNameOpt) ->
+                            let isPkSeq = schema.PkSeqCols |> List.exists (fun (s, t, col) -> s = c.Schema && t = c.Table && col = c.Column)
+                            let fkOpt = schema.ForeignKeys |> List.tryFind (fun fk ->
+                                fk.Schema = c.Schema && fk.Table = c.Table && fk.Column = c.Column
+                            )
+                            let mapType (typ: string) =
+                                match typ.Trim().ToLowerInvariant() with
+                                | "character varying" | "varchar" | "text" | "char" -> "String"
+                                | "int" | "integer" | "int4" -> "Int32"
+                                | "bigint" | "int8" -> "Id64"
+                                | "bool" | "boolean" -> "Bool"
+                                | "timestamp" | "timestamp with time zone" | "timestamptz" -> "Timestamp"
+                                | "jsonb" -> "Jsonb"
+                                | "float" | "float4" | "float8" | "double precision" | "real" -> "Float"
+                                | "uuid" -> "Guid"
+                                | "bytea" -> "Blob"
+                                | "decimal" | "numeric" -> "Decimal"
+                                | other -> other
+                            let colType =
+                                if c.DataType = "USER-DEFINED" then
+                                    match udtNameOpt with
+                                    | Some udtName when udtName = c.Column -> "enum []"
+                                    | Some udtName -> sprintf "enum [EName %s]" (quote udtName)
+                                    | None -> "enum []"
+                                elif Option.isSome fkOpt then
+                                    let fk = fkOpt.Value
+                                    let refTable =
+                                        match fk.RefSchema with
+                                        | Some s when s <> c.Schema -> sprintf "%s.%s" s fk.RefTable
+                                        | _ -> fk.RefTable
+                                    sprintf "frefId %s []" (quote refTable)
+                                elif isPkSeq then
+                                    "Id []"
                                 else
-                                    sprintf "%s []" c.DataType
-                        sprintf "col %s %s" (quote c.Column) colType
-                    )
-                    |> String.concat "\n        "
-                sprintf "table %s [] [\n        %s\n    ]" (quote tableName) colLines
-            )
-            |> String.concat "\n    "
-        let body =
-            [enumDefs; tables]
-            |> List.filter (fun s -> s <> "")
-            |> String.concat "\n    "
-        sprintf "schema %s [] [\n    %s\n]" (quote schemaName) body
-    )
-    |> String.concat "\n\n"
+                                    let mappedType = mapType c.DataType
+                                    if c.IsNullable.Trim().ToUpperInvariant() = "YES" then
+                                        sprintf "%s [Nullable]" mappedType
+                                    else
+                                        sprintf "%s []" mappedType
+                            sprintf "col %s %s" (quote c.Column) colType
+                        )
+                        |> String.concat "\n        "
+                    sprintf "table %s [] [\n        %s\n    ]" (quote tableName) colLines
+                )
+                |> String.concat "\n    "
+            let body =
+                [enumDefs; tables]
+                |> List.filter (fun s -> s <> "")
+                |> String.concat "\n    "
+            sprintf "schema %s [] [\n    %s\n]" (quote schemaName) body
+        )
+        |> String.concat "\n\n"
+    header + body

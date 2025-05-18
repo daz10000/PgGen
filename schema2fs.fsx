@@ -1,4 +1,5 @@
 #r "nuget: Argu, 6.2.0"
+#r "nuget: Npgsql, 9.0.0"
 #r "bin/Debug/net9.0/PgGen.dll"
 
 open System
