@@ -19,4 +19,7 @@
   <ItemGroup>
     <None Include="protein_demo.fsx" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Argu" Version="6.2.0" />
+  </ItemGroup>
 </Project>

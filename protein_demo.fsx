@@ -1,12 +1,6 @@
 #r "bin/Debug/net9.0/PgGen.dll"
 
 open PgGen
-open PgGen.ExtractSchema
-open Build
-
-// Copy your proteins definition here, or load from a file/module if needed
-let proteins = 
-
 open Build
 
 let proteins =
@@ -113,27 +107,5 @@ let proteins =
             ]
     ]
 
-let connectionString = 
-    System.IO.File.ReadAllText("connection_string.txt")
-let schemaInfo = ExtractSchema.extractSchemaAndEnums connectionString
-
-if verbose then
-    printfn "Extracted schema columns:"
-    for col, _ in schemaInfo.ColumnsWithUdt do
-        let isFk = schemaInfo.ForeignKeys |> List.exists (fun fk -> fk.Schema = col.Schema && fk.Table = col.Table && fk.Column = col.Column)
-        if isFk then
-            let fk = schemaInfo.ForeignKeys |> List.find (fun fk -> fk.Schema = col.Schema && fk.Table = col.Table && fk.Column = col.Column)
-            let refTable =
-                match fk.RefSchema with
-                | Some s when s <> col.Schema -> sprintf "%s.%s" s fk.RefTable
-                | _ -> fk.RefTable
-            printfn "  Schema: %s, Table: %s, Column: %s, DataType: %s, IsNullable: %s, FOREIGN KEY -> %s(%s)" col.Schema col.Table col.Column col.DataType col.IsNullable refTable fk.RefColumn
-        else
-            printfn "  Schema: %s, Table: %s, Column: %s, DataType: %s, IsNullable: %s" col.Schema col.Table col.Column col.DataType col.IsNullable
-    printfn "\nExtracted enums:"
-    for KeyValue(enumName, values) in schemaInfo.EnumMap do
-        printfn "  Enum: %s -> [%s]" enumName (String.concat ", " values)
-    printfn "\n--- Re-emitted Schema ---\n"
-
-let output = ExtractSchema.generateSchema schemaInfo
-System.IO.File.WriteAllText("schema_output.fs", output)
+let output = Generate.emitDatabase proteins
+printfn "%s" output
