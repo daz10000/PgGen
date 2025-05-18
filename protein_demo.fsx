@@ -1,6 +1,13 @@
-﻿module PgGen.Main
-open Build
+#r "bin/Debug/net9.0/PgGen.dll"
+
+open PgGen
 open PgGen.ExtractSchema
+open Build
+
+// Copy your proteins definition here, or load from a file/module if needed
+let proteins = 
+
+open Build
 
 let proteins =
     db "proteins" [ Owner "read_write" ] [
@@ -106,16 +113,8 @@ let proteins =
             ]
     ]
 
-if false then
-    let output = Generate.emitDatabase proteins
-    printfn $"{output}"
-
-// Connect and dump a schema
-
-let verbose = true // Set to true to enable verbose output
-
 let connectionString = 
-    System.IO.File.ReadAllText("c:/proj/PgGen/connection_string.txt")
+    System.IO.File.ReadAllText("connection_string.txt")
 let schemaInfo = ExtractSchema.extractSchemaAndEnums connectionString
 
 if verbose then
@@ -138,4 +137,3 @@ if verbose then
 
 let output = ExtractSchema.generateSchema schemaInfo
 System.IO.File.WriteAllText("schema_output.fs", output)
-
