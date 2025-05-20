@@ -177,28 +177,29 @@ open PgGen.Build
                                 | "bytea" -> "Blob"
                                 | "decimal" | "numeric" -> "Decimal"
                                 | other -> other
-                            let colType =
-                                if c.DataType = "USER-DEFINED" then
-                                    match udtNameOpt with
-                                    | Some udtName when udtName = c.Column -> "enum []"
-                                    | Some udtName -> sprintf "enum [EName %s]" (quote udtName)
-                                    | None -> "enum []"
-                                elif Option.isSome fkOpt then
-                                    let fk = fkOpt.Value
+                            let colLine =
+                                match fkOpt with
+                                | Some fk ->
                                     let refTable =
                                         match fk.RefSchema with
                                         | Some s when s <> c.Schema -> sprintf "%s.%s" s fk.RefTable
                                         | _ -> fk.RefTable
-                                    sprintf "frefId %s []" (quote refTable)
-                                elif isPkSeq then
-                                    "Id []"
-                                else
-                                    let mappedType = mapType c.DataType
-                                    if c.IsNullable.Trim().ToUpperInvariant() = "YES" then
-                                        sprintf "%s [Nullable]" mappedType
+                                    let attrs = if c.IsNullable.Trim().ToUpperInvariant() = "YES" then "[Nullable]" else "[]"
+                                    sprintf "frefId %s %s" (quote refTable) attrs
+                                | None ->
+                                    if c.DataType = "USER-DEFINED" then
+                                        match udtNameOpt with
+                                        | Some udtName -> sprintf "enum %s [EName %s]" (quote c.Column) (quote udtName)
+                                        | None -> sprintf "enum %s [EName <unknown_enum>]" (quote c.Column)
+                                    elif isPkSeq then
+                                        sprintf "col %s Id []" (quote c.Column)
                                     else
-                                        sprintf "%s []" mappedType
-                            sprintf "col %s %s" (quote c.Column) colType
+                                        let mappedType = mapType c.DataType
+                                        if c.IsNullable.Trim().ToUpperInvariant() = "YES" then
+                                            sprintf "col %s %s [Nullable]" (quote c.Column) mappedType
+                                        else
+                                            sprintf "col %s %s []" (quote c.Column) mappedType
+                            colLine
                         )
                         |> String.concat "\n        "
                     sprintf "table %s [] [\n        %s\n    ]" (quote tableName) colLines
