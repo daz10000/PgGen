@@ -74,7 +74,7 @@ storage:none
 nuget FSharp.Core
 nuget FSharp.Data.Npgsql >= 2.0.0
 nuget FSharp.Data.LiteralProviders >= 1.0.0
-nuget Npgsql >= 7.0.0
+nuget Npgsql >= 10.0.0
 nuget Plough.ControlFlow >= 1.1.0
 nuget Giraffe >= 6.0.0
 nuget Thoth.Json.Giraffe >= 1.2.2
