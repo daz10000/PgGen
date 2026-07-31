@@ -68,7 +68,7 @@ type Db = NpgsqlConnection<ConnectionString=Db.connectionStringCompileTime,
 // ------ tool file setup
 let paketFile = """source https://api.nuget.org/v3/index.json
 
-framework: net7.0
+framework: net10.0
 storage:none
 
 nuget FSharp.Core
@@ -97,7 +97,7 @@ let dotnetToolsJson = """{
   "isRoot": true,
   "tools": {
     "paket": {
-      "version": "7.2.1",
+      "version": "10.3.1",
       "commands": [
         "paket"
       ]

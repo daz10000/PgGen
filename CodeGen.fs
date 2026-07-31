@@ -705,7 +705,7 @@ let generate (proj:string) (folder:string) (d:Db) =
         stringBuffer {
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
             yield $"  <PropertyGroup>\n"
-            yield $"    <TargetFramework>net7.0</TargetFramework>\n"
+            yield $"    <TargetFramework>net10.0</TargetFramework>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
             for file in fileNames do
@@ -723,7 +723,7 @@ let generate (proj:string) (folder:string) (d:Db) =
         stringBuffer {
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
             yield $"  <PropertyGroup>\n"
-            yield $"    <TargetFramework>net7.0</TargetFramework>\n"
+            yield $"    <TargetFramework>net10.0</TargetFramework>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
             yield $"    <Compile Include=\"../Common/Common.fs\" />\n"
