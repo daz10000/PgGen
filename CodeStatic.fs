@@ -68,7 +68,7 @@ type Db = NpgsqlConnection<ConnectionString=Db.connectionStringCompileTime,
 // ------ tool file setup
 let paketFile = """source https://api.nuget.org/v3/index.json
 
-framework: net7.0
+framework: net"""+dotnetVersion+"""
 storage:none
 
 nuget FSharp.Core
@@ -92,18 +92,18 @@ Plough.WebApi.Server.Giraffe
 Plough.WebApi.Client.Dotnet
 """
 
-let dotnetToolsJson = """{
-  "version": 1,
-  "isRoot": true,
-  "tools": {
-    "paket": {
-      "version": "7.2.1",
-      "commands": [
-        "paket"
+let dotnetToolsJson = $"{{
+  \"version\": 1,
+  \"isRoot\": true,
+  \"tools\": {{
+    \"paket\": {{
+      \"version\": \"{paketVersion}\",
+      \"commands\": [
+        \"paket\"
       ]
-    }
-  }
-}"""
+    }}
+  }}
+}}"
 
 let commonFileSource proj =
     stringBuffer {

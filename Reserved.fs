@@ -936,3 +936,8 @@ let reservedFSharp =
     "virtual"] |> Set.ofList
 
 let isReserved (s:string) = reserved.Contains (s.ToLower()) || reservedFSharp.Contains (s.ToLower())
+
+let quoteFSharpReserved s =
+    if isReserved s then
+        $"``{s}``"
+    else s

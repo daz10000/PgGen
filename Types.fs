@@ -32,10 +32,14 @@ and Unique = {
 }
 /// This is a reference to an existing enum (inside a table)
 and EnumRef = {
+    /// name of enumeration type for the column
     EName : string
+    /// optional schema in case the enum is defined in a different schema
     ESchema : string option
     Generate : bool
+    /// is the generated column nullable
     IsNullable : bool
+    /// Name of the column refering to the enum
     Name : string option
 }
 

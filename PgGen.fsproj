@@ -13,8 +13,8 @@
     <Compile Include="Generate.fs" />
     <Compile Include="CodeStatic.fs" />
     <Compile Include="CodeGen.fs" />
-    <Compile Include="Build.fs" />
-    <Compile Include="Schema.fs" />
+    <Compile Include="Build.fs" /><Compile Include="Schema.fs" />
+    
   </ItemGroup>
   <ItemGroup>
     <None Include="protein_demo.fsx" />

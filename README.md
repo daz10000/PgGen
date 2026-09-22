@@ -10,11 +10,13 @@ Generates SQL for
     - schema creation
     - simple table creation
     - foreign key references, unique constraints
+
 Generates code fo
     - CRUD operations
     - Asp.Net / Plough web api endpoints
 
-## Example
+Reverse engineering of existing databases into Pggen speci
+    - take 
 
 ```FSharp
 
@@ -67,6 +69,23 @@ printfn $"{output}"
 +------------------+--------------------------+-------------------------------------------------------------------+
 ```
 
+## Reverse engineering an existing database
+
+This is experimental, but if you have an existing database and want to generate a PgGen spec, the script `schema2fs.fsx` can make a spec.
+
+### Usage:
+
+```bash
+dotnet fsi schema2fs.fsx [--connectionstring <connection_string>] --output <output_file.fsx>
+```
+
+If `connectionstring` is not provided, you must have a `connection_string.txt` file in the current directory with the connection string.
+
+Example:
+```bash
+
+dotnet fsi schema2fs.fsx --connectionstring "Host=localhost;Port=5432;Database=proteins;Username=postgres;Password=postgres" --output schema.fsx
+```
 
 ## Todo
 
