@@ -1,5 +1,6 @@
-﻿module PgGen.Main
+#r "bin/Debug/net9.0/PgGen.dll"
 
+open PgGen
 open Build
 
 let proteins =
@@ -107,5 +108,4 @@ let proteins =
     ]
 
 let output = Generate.emitDatabase proteins
-
-printfn $"{output}"
+printfn "%s" output

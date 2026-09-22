@@ -152,9 +152,10 @@ let enumDef (name:string) (attrs:EAttr list) =
             EComment = comment
         }
 
-let enum (name:string) (attrs:EnumRefAttr list) =
+/// given an enumName (optionally schema.enumname) and a list of attrs. add an enum reference column
+let enum (enumName:string) (attrs:EnumRefAttr list) =
     let schema, enum =
-        match name with
+        match enumName with
         | Regex @"(.+)\.(.+)" [schema ; enum] -> Some schema,enum
         | s -> None, s
 

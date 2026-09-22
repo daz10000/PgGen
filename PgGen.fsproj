@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AssemblyName>PgGen</AssemblyName>
+    <RootNamespace>PgGen</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Types.fs" />
@@ -11,7 +13,14 @@
     <Compile Include="Generate.fs" />
     <Compile Include="CodeStatic.fs" />
     <Compile Include="CodeGen.fs" />
-    <Compile Include="Build.fs" />
-    <Compile Include="Program.fs" />
+    <Compile Include="Build.fs" /><Compile Include="Schema.fs" />
+    
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="protein_demo.fsx" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Argu" Version="6.2.0" />
+    <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
 </Project>

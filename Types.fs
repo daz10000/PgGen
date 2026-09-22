@@ -32,16 +32,23 @@ and Unique = {
 }
 /// This is a reference to an existing enum (inside a table)
 and EnumRef = {
+    /// name of enumeration type for the column
     EName : string
+    /// optional schema in case the enum is defined in a different schema
     ESchema : string option
     Generate : bool
+    /// is the generated column nullable
     IsNullable : bool
+    /// Name of the column refering to the enum
     Name : string option
 }
 
 and EnumRefAttr =
+    /// EName is the name of the enum in the database
     | EName of string
+    /// ERComment is the comment for the enum reference
     | ERComment of string
+    /// Mark the enum column as nullable
     | ENullable
 
 and PKey = {

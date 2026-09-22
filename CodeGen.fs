@@ -21,8 +21,15 @@ let ensureFolder(folder:string) =
 // postgres prefers lowercase, so CatDog -> cat_dog
 // todo: not sure we are doing this on sql generation side to be consistent
 let postgrestify (s:string) =
-    s.Replace(" ","_").Replace("-","_").ToLowerInvariant()
+    let quote =  s.ToLowerInvariant() <> s
+    let pre = s.Replace(" ","_").Replace("-","_")
+    if quote then
+        $"\"{pre}\""
+    else
+        pre.ToLowerInvariant()
 
+/// generates a file SchemaDomain.fs that contains type definitions for each table in the
+/// for each of the CRUD operations
 let emitDomain (proj:string) (s:Schema) =
     let domain = titleCase s.SName
     let projCap = proj |> titleCase
@@ -91,6 +98,8 @@ let emitDomain (proj:string) (s:Schema) =
                         yield $"    {colName} : int{optionModifier}\n"
                     else
                         failwithf "Not implemented - not integer foreign key references"
+
+                // columns with enum type
                 for e in t.ERefs do
                     if e.Generate then
                         let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
@@ -203,12 +212,12 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"let {fSharpVar}ToEnum(v:{fSharpType}) =\n"
                 yield $"    match v with\n"
                 for v in e.EValues do
-                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{s.SName}.Types.{e.EName}.{v}\n"
+                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{v}\n"
                 yield $"\n"
-                yield $"let {fSharpVar}FromEnum(e:Db.{s.SName}.Types.{e.EName}) =\n"
+                yield $"let {fSharpVar}FromEnum(e:Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}) =\n"
                 yield $"    match e with\n"
                 for v in e.EValues do
-                    yield $"    | Db.{s.SName}.Types.{e.EName}.{v} -> {fSharpType}.{v |> toFSharp}\n"
+                    yield $"    | Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{v} -> {fSharpType}.{v |> toFSharp}\n"
                 yield $"    | x -> failwithf $\"Impossible {e.EName} enum value {{x}}\"\n"
                 yield $"\n"
 
@@ -222,8 +231,11 @@ let emitDomain (proj:string) (s:Schema) =
                                                     match c.CType with
                                                     | Int32 -> "-1"
                                                     | String -> "''"
-                                                    | Timestamp -> "'0001-01-01'"
+                                                    | Timestamp -> "'0001-01-01'::timestamptz"
                                                     | Jsonb -> "'{}'::jsonb"
+                                                    | Float -> "0.0"
+                                                    | Enum x -> $"NULL::{x}"
+                                                    | Decimal -> "0.0M"
                                                     | _ -> failwithf $"Not implemented - default value for {c.CType}"
                                                 {| CName = c.CName ; CValue = $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)" |}
                                             else
@@ -245,6 +257,9 @@ let emitDomain (proj:string) (s:Schema) =
                                                     | String -> "\"\""
                                                     | Timestamp -> "\"0001-01-01\""
                                                     | Jsonb -> "\"{}\""
+                                                    | Float -> "0.0"
+                                                    | Enum x -> "NULL"
+                                                    | Decimal -> "0.0M"
                                                     | _ -> failwithf $"Not implemented - default value for {c.CType}"
                                                 $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
                                             else
@@ -622,7 +637,7 @@ let generate (proj:string) (folder:string) (d:Db) =
 
     let generatedFileNames = [
         for schema in d.Schemas do
-            let schemaCap = titleCase schema.SName
+            let schemaCap = titleCase schema.SName |> deReservifyFSharp // avoid collision with keywords
             printfn $"Generating schema {schemaCap}"
             let schemaSubFolder = $"{projCap}.Domain.{schemaCap}"
             let schemaFolder = Path.Combine(folder, $"{projCap}.Domain.{schemaCap}")
@@ -709,7 +724,7 @@ let generate (proj:string) (folder:string) (d:Db) =
         stringBuffer {
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
             yield $"  <PropertyGroup>\n"
-            yield $"    <TargetFramework>net10.0</TargetFramework>\n"
+            yield $"    <TargetFramework>net{dotnetVersion}</TargetFramework>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
             for file in fileNames do
