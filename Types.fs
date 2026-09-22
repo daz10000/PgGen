@@ -89,6 +89,8 @@ and Table = {
 
 and TableAttr =
     | Comment of string
+    | RlsTenantColumn of string
+    | RlsOrganizationColumn of string
     | TBD
 
 and ColumnType =

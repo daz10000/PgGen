@@ -4,6 +4,44 @@ open System
 open PgGen.StringBuffer
 
 let cleanString (s:string) = s.Replace("'","''")
+
+let private colExists (table:Table) (colName:string) =
+    table.FullCols()
+    |> List.exists (fun c -> String.Equals(c.CName, colName, StringComparison.OrdinalIgnoreCase))
+
+let private tryRlsTenantColumn (table:Table) =
+    table.Attributes
+    |> List.tryPick (function | RlsTenantColumn c -> Some c | _ -> None)
+    |> Option.orElseWith (fun () -> if colExists table "tenant_id" then Some "tenant_id" else None)
+
+let private tryRlsOrgColumn (table:Table) =
+    table.Attributes
+    |> List.tryPick (function | RlsOrganizationColumn c -> Some c | _ -> None)
+    |> Option.orElseWith (fun () -> if colExists table "organization_id" then Some "organization_id" else None)
+
+let private emitRls owner schema (table:Table) =
+    match tryRlsTenantColumn table with
+    | None -> ""
+    | Some tenantCol ->
+        let orgPredicate =
+            match tryRlsOrgColumn table with
+            | Some orgCol ->
+                $"\n    AND\n    (current_setting('app.organization_id', true) = '' OR {orgCol}::text = current_setting('app.organization_id', true))"
+            | None -> ""
+
+        let predicate =
+            $"({tenantCol}::text = current_setting('app.tenant_id', true){orgPredicate})"
+
+        stringBuffer {
+            yield $"ALTER TABLE {schema}.{table.TName} ENABLE ROW LEVEL SECURITY;\n"
+            yield $"ALTER TABLE {schema}.{table.TName} FORCE ROW LEVEL SECURITY;\n"
+            yield $"CREATE POLICY {table.TName}_tenant_isolation ON {schema}.{table.TName}\n"
+            yield $"    USING {predicate}\n"
+            yield $"    WITH CHECK {predicate};\n"
+            yield $"ALTER TABLE {schema}.{table.TName} OWNER TO {owner};\n"
+            yield "\n"
+        }
+
 let emitTable owner schema (table:Table) =
     stringBuffer {
         let hasId = table.Cols |> List.exists (fun c -> c.CType = Id)
@@ -66,6 +104,7 @@ let emitTable owner schema (table:Table) =
             | None -> ()
         yield $"ALTER TABLE {schema}.{table.TName} OWNER TO {owner};\n"
         yield "\n"
+        yield emitRls owner schema table
     }
 
 let emitEnum (owner:string) (schema:string) (e:PEnum) =
