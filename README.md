@@ -10,10 +10,47 @@ Generates SQL for
     - schema creation
     - simple table creation
     - foreign key references, unique constraints
-
-Generates code fo
+    - optional Row Level Security (RLS) policy scaffolding for tenant-isolated tables
     - CRUD operations
     - Asp.Net / Plough web api endpoints
+    - ambient tenant RLS session helpers in generated Db module
+
+## Tenant RLS support
+
+PgGen now supports emitting tenant RLS policies and runtime helper hooks.
+
+Mark a table as tenant-scoped with either:
+
+- a conventional `tenant_id` column name (auto-detected), or
+- an explicit table attribute via `rlsTenant "my_tenant_col"`
+
+Optional organization scoping can be added with `rlsOrganization "organization_id"`.
+
+Example:
+
+```fsharp
+table "invoice" [ rlsTenant "tenant_id"; rlsOrganization "organization_id" ] [
+    col "id" Id []
+    col "tenant_id" Guid []
+    col "organization_id" Guid [Nullable]
+    col "amount" Decimal []
+]
+```
+
+Generated SQL includes:
+
+- `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
+- `ALTER TABLE ... FORCE ROW LEVEL SECURITY`
+- tenant isolation policy using `current_setting('app.tenant_id', true)`
+- optional organization isolation using `current_setting('app.organization_id', true)`
+
+Generated Db code includes `TenantRls` helpers:
+
+- `setAmbient` / `clearAmbient`
+- `setAmbientFromValues`
+- `applyAmbientToConnection`
+
+Generated storage functions call `applyAmbientToConnection` automatically after opening a connection.
 
 Reverse engineering of existing databases into Pggen speci
     - take 

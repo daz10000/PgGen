@@ -32,6 +32,58 @@ module Db =
 
     let [<Literal>] methodTypes = MethodTypes.Task ||| MethodTypes.Sync
 
+module TenantRls =
+    type TenantContext = {
+        TenantId : string
+        OrganizationId : string option
+    }
+
+    let private ambientTenant = new System.Threading.AsyncLocal<TenantContext option>()
+
+    let setAmbient (tenant:TenantContext) =
+        ambientTenant.Value <- Some tenant
+
+    let setAmbientFromValues (tenantId:string) (organizationId:string) =
+        let org =
+            if String.IsNullOrWhiteSpace organizationId then
+                None
+            else
+                Some organizationId
+        setAmbient { TenantId = tenantId; OrganizationId = org }
+
+    let clearAmbient () =
+        ambientTenant.Value <- None
+
+    let tryGetAmbient () =
+        ambientTenant.Value
+
+    let private escapeSqlLiteral (value:string) =
+        value.Replace("'", "''")
+
+    let buildSessionSql (tenant:TenantContext) =
+        let tenantId = escapeSqlLiteral tenant.TenantId
+        let orgId = tenant.OrganizationId |> Option.defaultValue "" |> escapeSqlLiteral
+
+        "select set_config('app.tenant_id', '" + tenantId + "', true);\n"
+        + "select set_config('app.organization_id', '" + orgId + "', true);\n"
+
+    let applyToConnection (connection:Npgsql.NpgsqlConnection) (tenant:TenantContext) =
+        task {
+            use cmd = connection.CreateCommand()
+            cmd.CommandText <- buildSessionSql tenant
+            let! _ = cmd.ExecuteNonQueryAsync(Async.DefaultCancellationToken)
+            return ()
+        }
+
+    let applyAmbientToConnection (connection:Npgsql.NpgsqlConnection) =
+        task {
+            match ambientTenant.Value with
+            | Some tenant ->
+                do! applyToConnection connection tenant
+            | None ->
+                ()
+        }
+
 type Db<'a>() =
     static member inline openConnectionAsync() =
         task {
@@ -74,7 +126,7 @@ storage:none
 nuget FSharp.Core
 nuget FSharp.Data.Npgsql >= 2.0.0
 nuget FSharp.Data.LiteralProviders >= 1.0.0
-nuget Npgsql >= 7.0.0
+nuget Npgsql >= 10.0.0
 nuget Plough.ControlFlow >= 1.1.0
 nuget Giraffe >= 6.0.0
 nuget Thoth.Json.Giraffe >= 1.2.2

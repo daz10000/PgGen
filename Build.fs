@@ -104,6 +104,13 @@ let db (name:string) (dbAttr:DBAttr list) (body:DBBodyItem list) =
 let unique (cols:string list) =
     Unique {
         Cols = cols }
+
+let rlsTenant (column:string) =
+    RlsTenantColumn column
+
+let rlsOrganization (column:string) =
+    RlsOrganizationColumn column
+
 let frefId (reference:string) (attrs:FRefAttr list) =
 
     let name =
