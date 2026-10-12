@@ -159,13 +159,7 @@ let extractSchemaAndEnums (schemaExclude: Set<string>) (connectionString: string
 
 /// Generates a schema definition (as F# code or other format) from the extracted schema and enums.
 let generateSchema (schema: ExtractedSchema) (projectName:string) =
-    let pgGenVersion =
-        let asm = typeof<ColumnInfo>.Assembly
-        match asm.GetCustomAttributes(typeof<Reflection.AssemblyInformationalVersionAttribute>, false) with
-        | [| :? Reflection.AssemblyInformationalVersionAttribute as v |] ->
-            v.InformationalVersion.Split('+').[0] // drop source link commit hash
-        | _ -> asm.GetName().Version.ToString(3)
-    let header = $"""#r "nuget: FSharp.PgGen, {pgGenVersion}"
+    let header = $"""#r "nuget: FSharp.PgGen, {Common.pgGenVersion}"
 // or, when working against a local checkout of PgGen:
 // #r "<path to PgGen>/bin/Debug/net10.0/PgGen.dll"
 open PgGen

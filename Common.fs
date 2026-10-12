@@ -36,3 +36,11 @@ let toFSharpLower( s:string) =
 
 let titleCase (s:string) =
     System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s)
+
+/// FSharp.PgGen package version (set from RELEASE_NOTES.md when PgGen is built)
+let pgGenVersion =
+    let asm = System.Reflection.Assembly.GetExecutingAssembly()
+    match asm.GetCustomAttributes(typeof<System.Reflection.AssemblyInformationalVersionAttribute>, false) with
+    | [| :? System.Reflection.AssemblyInformationalVersionAttribute as v |] ->
+        v.InformationalVersion.Split('+').[0] // drop source link commit hash
+    | _ -> asm.GetName().Version.ToString(3)

@@ -133,6 +133,14 @@ task {
     let! rawPageBody = rawPage.Content.ReadAsStringAsync()
     check "non F# client: empty json body uses defaults" (int rawPage.StatusCode = 200 && rawPageBody.Contains "\"Items\"") rawPageBody
 
+    let! spec = http.GetStringAsync("api/openapi.json")
+    let specDoc = Text.Json.JsonDocument.Parse(spec)
+    let paths = [ for p in specDoc.RootElement.GetProperty("paths").EnumerateObject() -> p.Name ]
+    check "openapi.json served, 3.1, lists the routes" (specDoc.RootElement.GetProperty("openapi").GetString() = "3.1.0"
+                                                     && [ "/lab/sample/page"; "/lab/sample/list_by_id_organism"; "/lab/sample/read_by_label"
+                                                          "/lab/sample_tag/page"; "/lab/organism/read/{id}"; "/lab/organism/count" ]
+                                                        |> List.forall (fun p -> paths |> List.contains p)) paths
+
     let! delParent = client.Lab.DeleteOrganism orgId
     check "delete row still referenced -> Conflict" (match delParent with Error (Conflict _) -> true | _ -> false) delParent
     let! delTag = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "red" }

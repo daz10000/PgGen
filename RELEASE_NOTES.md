@@ -11,6 +11,7 @@
 * Composite primary keys (pKey) emitted in SQL
 * New generated operations per table: count, keyset paging (page), a paged lookup per foreign key (list_by_<fk>) and a lookup per unique constraint (read_by_<cols>)
 * index DSL item; foreign key columns are indexed automatically
+* OpenAPI 3.1 document (Api/openapi.json) generated with the code from the same model, embedded in the backend and served at GET /api/openapi.json
 * Enum values on the wire are the postgres labels (e.g. "in_progress"), not F# case names
 * JSON input: optional fields may be omitted or null
 * Fix: nullable enum columns did not compile in update / read types
