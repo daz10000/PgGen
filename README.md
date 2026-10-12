@@ -228,53 +228,98 @@ ALTER TABLE lab.sample OWNER TO read_write;
 generated/
 ├── Directory.Packages.props         NuGet central package versions (see below)
 ├── compile_time_db.txt              connection string used while compiling
-├── Acme.Backend.fsproj              net10.0: database, services, web server
+├── Acme.Backend.fsproj              database, services, web server
 ├── Common/
-│   ├── Common.fs                    shared types (BatchOffset)            [shared]
-│   └── Db.fs                        connection, transactions, RLS helpers [backend]
+│   ├── Common.fs                    paging, ApiError, json settings, HttpClient helpers [shared]
+│   └── Db.fs                        connection, transactions, RLS helpers               [backend]
 ├── Acme.Domain.Lab/                 one folder per schema
 │   ├── LabDomain.fs                 records: Sample, CreateSample, UpdateSample, enums  [shared]
 │   ├── LabStorage.fs                create/read/update/list, SQL checked at compile time
 │   └── LabService.fs                business logic goes here (thin wrappers to start)
 └── Api/
-    ├── AcmeApi.fsproj               netstandard2.0 shared project: domain + contract + client
+    ├── AcmeApi.fsproj               shared project: domain + contract + client
     ├── LabApi.fs                    Api contract record + typed Client          [shared]
-    ├── LabApiServer.fs              HTTP routes for the Api                     [backend]
+    ├── ApiHandlers.fs               Giraffe handlers: json in/out, errors       [backend]
+    ├── LabApiServer.fs              Giraffe routes for the Api                  [backend]
     ├── LabApiWireup.fs              Api record implemented by the service layer [backend]
-    ├── AcmeServerApi.fs             all schemas' apis in one record             [backend]
+    ├── AcmeServerApi.fs             all schemas' apis + one handler for /api    [backend]
     └── AcmeClientApi.fs             root client with one member per schema      [shared]
 ```
 
 **Shared project** (`Api/<Project>Api.fsproj`). Holds the domain records, the api contract and
-the client. It targets `netstandard2.0` and depends only on the Plough contract packages, with no
-Npgsql, Giraffe or type providers, so front ends and other services can reference it.
-The backend references it, so both sides use the same types.
+the typed client. Its only dependency is
+[FSharp.SystemTextJson](https://github.com/Tarmil/FSharp.SystemTextJson): no Npgsql, Giraffe or
+type providers, so front ends and other services can reference it. The backend references it,
+so both sides use the same types.
 
-**Backend project** (`<Project>.Backend.fsproj`). Holds storage, services and server routes.
-Reference it from your server application.
+**Backend project** (`<Project>.Backend.fsproj`). Holds storage, services and the server routes,
+written in plain [Giraffe](https://github.com/giraffe-fsharp/Giraffe). Reference it from your
+server application.
 
-Each table gets these routes under `/<schema>`. The generated client expects them to be mounted
-under `/api`, so a full path looks like `/api/lab/sample/read/42`.
+Both projects target `net10.0`.
 
-| Route                       | Method | Notes                                     |
-|-----------------------------|--------|-------------------------------------------|
-| `/<table>/create`           | POST   | body: `Create<Table>`; returns the new id |
-| `/<table>/read/{id}`        | GET    | POST `/<table>/read` for composite keys   |
-| `/<table>/update`           | POST   | body: `Update<Table>`                     |
-| `/<table>/delete`           | POST   | not implemented yet                       |
-| `/<table>/list?offset=&batchSize=` | GET | paging is optional                     |
+### The HTTP api
 
-Using it at runtime:
+Each table gets these routes, mounted under `/api/<schema>`:
+
+| Route                                  | Method | Body / result                                   |
+|----------------------------------------|--------|-------------------------------------------------|
+| `/<table>/create`                      | POST   | `Create<Table>` → new id                        |
+| `/<table>/read/{id}`                   | GET    | → `<Table>` or `null`                           |
+| `/<table>/read`                        | POST   | composite key tables: `<Table>PKey` → `<Table>` or `null` |
+| `/<table>/update`                      | POST   | `Update<Table>` → `null`                        |
+| `/<table>/delete`                      | POST   | id (not implemented yet)                        |
+| `/<table>/list?offset=&batchSize=`     | GET    | → array; both parameters optional               |
+
+The wire format is plain JSON, so any language can call the api:
+
+- Record fields keep their F# names (`{"Id":1,"Label":"s1","Notes":null,"Status":"InProgress"}`).
+- `option` values are `null` when absent, and enums are strings.
+- `Timestamp` values are ISO 8601. `Jsonb` columns are strings that contain JSON.
+- Errors use an HTTP status code and a problem body, for example
+  `{"Title":"Conflict","Status":409,"Detail":"duplicate key value violates unique constraint ..."}`.
+
+| `ApiError`     | Status | Raised for                                                       |
+|----------------|--------|------------------------------------------------------------------|
+| `NotFound`     | 404    | returned by your service code                                    |
+| `Validation`   | 400    | malformed json or query parameters, check / not-null violations  |
+| `Conflict`     | 409    | unique and foreign key violations                                |
+| `Unexpected`   | 500    | anything else; details are logged on the server, not returned    |
+
+Every operation returns `ApiResult<'T>`, which is a `Task<Result<'T, ApiError>>`. That holds on
+the server (service layer) and in the client.
+
+### Using it at runtime
+
+Server (ASP.NET Core + Giraffe):
 
 ```fsharp
-// backend startup
 Acme.Db.Db.connectionString <- Some "Host=...;Database=lab_db;Username=...;Password=..."
-let labRoutes = Acme.Api.Lab.Server.build Acme.Api.Server.api.Lab   // mount under /api in your Giraffe app
 
-// .NET client (create the ApiClient with Plough.WebApi.Client.Dotnet)
-let client = Acme.Api.Acme(apiClient)
-let sample = client.Lab.ReadSample 42      // TaskEither<Sample option>
+builder.Services.AddGiraffe() |> ignore
+let app = builder.Build()
+app.UseGiraffe(Acme.Api.Server.handler Acme.Api.Server.api)   // every schema under /api
+// or mount schemas individually: Acme.Api.Lab.Server.build Acme.Api.Server.api.Lab
 ```
+
+Business logic goes in the generated `<Schema>Service.fs` functions. Return
+`Error (NotFound ...)`, `Error (Validation ...)` and so on for expected failures.
+
+.NET client:
+
+```fsharp
+let http = new HttpClient(BaseAddress = Uri "https://lab.example.com/")
+let client = Acme.Api.Acme(http)          // or Acme.Api.Acme(http, "custom/prefix")
+
+task {
+    match! client.Lab.ReadSample 42 with
+    | Ok (Some sample) -> printfn $"{sample.Label}"
+    | Ok None -> printfn "no such sample"
+    | Error err -> printfn $"failed: {err}"
+}
+```
+
+Client paths are relative, so `BaseAddress` can include a path prefix; end it with `/`.
 
 Pick a project name that differs from your schema names. The root client type is named after the
 project, and each schema gets a namespace with its own name.
@@ -297,6 +342,8 @@ live in `Directory.Packages.props`.
   one. It is marked as generated and is overwritten on every run.
 - If your repository already has one, PgGen leaves it alone and prints the `<PackageVersion>`
   lines it needs, so you can merge them.
+- FSharp.Core is referenced explicitly, because the SDK's implicit reference does not apply
+  under central package management.
 - Older PgGen versions generated paket files. PgGen warns if it finds them; they can be deleted.
 
 ## Row level security (multi-tenant tables)
@@ -327,13 +374,19 @@ CREATE POLICY invoice_tenant_isolation ON lab.invoice
 ```
 
 The generated `Db.fs` has a `TenantRls` module that holds the current tenant in an `AsyncLocal`.
-Every generated storage function applies it to its connection:
+Every generated storage function applies it to its connection when the connection opens. With
+no tenant set, the settings are cleared, which matches no rows. Set the tenant per request, for
+example from an authenticated claim:
 
 ```fsharp
-open Lab.Db
-TenantRls.setAmbientFromValues tenantId organizationId   // e.g. in request middleware
-// ... storage / service calls now only see that tenant's rows ...
-TenantRls.clearAmbient ()
+let withTenant : HttpHandler =
+    fun next ctx ->
+        match ctx.User.FindFirst "tenant_id" with
+        | null -> Acme.Db.TenantRls.clearAmbient ()
+        | claim -> Acme.Db.TenantRls.setAmbientFromValues claim.Value ""
+        next ctx
+
+app.UseGiraffe(withTenant >=> Acme.Api.Server.handler Acme.Api.Server.api)
 ```
 
 ## Reverse engineering an existing database
@@ -359,14 +412,17 @@ The same functionality is available from code as `PgGen.ExtractSchema.extractSch
 
 ## Limitations and roadmap
 
-- Delete operations are generated as stubs, and there is no soft delete yet.
-- Nullable `Bool`, `Guid`, `Blob` and `Id64` columns, and nullable arrays, are not yet supported by
-  the storage layer generator. The SQL is fine.
+- Delete operations are generated as stubs (they return a 500), and there is no soft delete yet.
+- Nullable columns go through the type provider as sentinel values: `-1`, `''`, `0.0` and
+  `0001-01-01`. A *real* value equal to the sentinel is stored as `NULL`. Nullable `Bool`, `Guid`
+  and `Blob` columns, and nullable arrays, are not supported by the storage generator yet. The SQL
+  is fine.
 - Foreign keys are always integer references to `id`.
 - `FComment`, `ERComment` and `CUpdate` are accepted but not emitted yet.
+- Reverse engineering does not recover composite primary keys (`pKey`) or unique constraints.
 - There is no index support, and no migrations: PgGen generates `CREATE` scripts.
-- The generated web layer uses the Plough libraries, which are no longer maintained. Replacing
-  them is being investigated; see [docs/plough-removal.md](docs/plough-removal.md).
+- There is no OpenAPI or TypeScript output yet, although the JSON api is plain enough to call by
+  hand.
 
 ## Contributing
 

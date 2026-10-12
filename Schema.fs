@@ -228,7 +228,6 @@ open PgGen.Build
                                 match c.UDTName with
                                 | "timestamptz" -> "Timestamp"
                                 | "timestamp with time zone" -> "Timestamp"
-                                | "int8" -> "Int32" // NB: mapType says Id64 - bigint values can overflow Int32
                                 | "float4" -> "Float"
                                 | "timestamp" -> "Timestamp"
                                 | "numeric" -> "Decimal"

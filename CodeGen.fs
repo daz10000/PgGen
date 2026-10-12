@@ -202,7 +202,7 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"\n"
             yield $"open {projCap}.Db\n"
             yield $"open {projCap}.Domain.{domain}\n"
-            yield $"open Plough.ControlFlow\n"
+            yield $"open System.Threading.Tasks\n"
 
             // Any enums in the schema that need converter functions to/from F# types
             for e in s.Enums do
@@ -235,7 +235,8 @@ let emitDomain (proj:string) (s:Schema) =
                                                     | Jsonb -> "'{}'::jsonb"
                                                     | Float -> "0.0"
                                                     | Enum x -> $"NULL::{x}"
-                                                    | Decimal -> "0.0M"
+                                                    | Decimal -> "0.0"
+                                                    | Id64 -> "-1::bigint" // a plain -1 makes postgres infer an int parameter
                                                     | _ -> failwithf $"Not implemented - default value for {c.CType}"
                                                 {| CName = c.CName ; CValue = $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)" |}
                                             else
@@ -260,6 +261,7 @@ let emitDomain (proj:string) (s:Schema) =
                                                     | Float -> "0.0"
                                                     | Enum x -> "NULL"
                                                     | Decimal -> "0.0M"
+                                                    | Id64 -> "-1L"
                                                     | _ -> failwithf $"Not implemented - default value for {c.CType}"
                                                 $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
                                             else
@@ -294,7 +296,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        use cmd = Db.CreateCommand<\"\"\"INSERT INTO {s.SName}.{t.TName} (\n"
                 yield $"            {colNamesExceptKey}) \n                    VALUES({insertPlaceHolders}) {returning}\n"
                 yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let newId = cmd.Execute({nonPKParametersForCall})\n"
+                yield $"        let! newId = cmd.TaskAsyncExecute({nonPKParametersForCall})\n"
                 match t.PKey with
                 | None ->
                     yield $"        return newId.Value // returns option but should be reliable\n"
@@ -309,7 +311,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        use cmd = Db.CreateCommand<\"\"\""
                 yield $"        SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} WHERE {readWhereClause}\n"
                 yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let result = cmd.Execute({parameters})\n"
+                yield $"        let! result = cmd.TaskAsyncExecute({parameters})\n"
                 yield $"        return result |> Option.map(fun r->\n"
                 yield $"                                    {{\n"
                 for col in t.FullCols() do
@@ -318,7 +320,8 @@ let emitDomain (proj:string) (s:Schema) =
                         | Enum e -> $" |> {e |> toFSharpLower}FromEnum"
                         | _ -> ""
                     yield $"                                        {col.FSharpName()} = r.{col.CName}{optionalEnumMap}\n"
-                yield $"                                    }})\n"
+                // annotate: the PKey record can have exactly the same fields
+                yield $"                                    }}:{fsharpName})\n"
                 yield $"    }}\n"
                 yield $"\n"
 
@@ -350,17 +353,16 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"                {updatePlaceHolders}\n"
                 yield $"          WHERE {readWhereClause}\n"
                 yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let result = cmd.Execute({updateParameters})\n"
+                yield $"        let! _ = cmd.TaskAsyncExecute({updateParameters})\n"
                 yield $"        return ()\n"
                 yield $"    }}\n"
                 yield $"\n"
                 // ====================================================
                 // Delete code
                 // ====================================================
-                yield $"let delete{fsharpName} (id:{t.PKeyTypeName()}) =\n"
+                yield $"let delete{fsharpName} (id:{t.PKeyTypeName()}) : Task<unit> =\n"
                 yield $"    task {{\n"
-                yield $"        failwithf \"Not implemented\"\n"
-                yield $"        return \"unimplemented\"\n"
+                yield $"        return raise (System.NotImplementedException \"delete{fsharpName} is not implemented yet\")\n"
                 yield $"    }}"
                 yield $"\n\n"
 
@@ -440,41 +442,31 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"\n"
             yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
-            yield $"open Plough.ControlFlow\n"
             yield $"\n"
-            yield $"// PgGen: note - these are simple wrappers for now but business logic / transactions / multiple IO calls can be handled here\n"
+            yield $"// PgGen: note - these are simple wrappers for now but business logic / validation / transactions /\n"
+            yield $"// multiple IO calls can be handled here.  Return Error (NotFound / Validation / Conflict ..) for\n"
+            yield $"// expected failures; exceptions are turned into api errors by the web layer.\n"
             for t in s.Tables do
                 let tableCap = t.FSharpName()
+                let createReturnType =
+                    match t.PKey with
+                    | None -> t.PKeyTypeName()
+                    | Some _ -> "unit"
+                let wrap (signature:string) (call:string) =
+                    stringBuffer {
+                        yield $"let {signature} =\n"
+                        yield $"    task {{\n"
+                        yield $"        let! result = {call}\n"
+                        yield $"        return Ok result\n"
+                        yield $"    }}\n"
+                        yield $"\n"
+                    }
                 yield $"// -------------------------------------------\n"
-                yield $"let create{tableCap} (request:Create{tableCap}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.create{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let read{tableCap} (request:{t.PKeyTypeName()}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.read{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let update{tableCap} (request:Update{tableCap}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.update{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let delete{tableCap} (request:{t.PKeyTypeName()}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.delete{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let list{tableCap} (batchOffset:BatchOffset) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.list{tableCap} batchOffset.Offset batchOffset.BatchSize\n"
-                yield $"    }}\n"
-                yield $"\n"
+                yield wrap $"create{tableCap} (request:Create{tableCap}) : ApiResult<{createReturnType}>" $"Storage.create{tableCap} request"
+                yield wrap $"read{tableCap} (request:{t.PKeyTypeName()}) : ApiResult<{tableCap} option>" $"Storage.read{tableCap} request"
+                yield wrap $"update{tableCap} (request:Update{tableCap}) : ApiResult<unit>" $"Storage.update{tableCap} request"
+                yield wrap $"delete{tableCap} (request:{t.PKeyTypeName()}) : ApiResult<unit>" $"Storage.delete{tableCap} request"
+                yield wrap $"list{tableCap} (batchOffset:BatchOffset) : ApiResult<{tableCap} []>" $"Storage.list{tableCap} batchOffset.Offset batchOffset.BatchSize"
         }
     // Api contract + client.  Compiled into the shared project, so it must not depend on server or
     // database libraries.  A namespace (rather than a module) lets the server routing live in a
@@ -483,8 +475,7 @@ let emitDomain (proj:string) (s:Schema) =
         stringBuffer {
             yield $"namespace {projCap}.Api.{domain}\n"
             yield $"\n"
-            yield $"open Plough.ControlFlow\n"
-            yield $"open Plough.WebApi.Client\n"
+            yield $"open System.Net.Http\n"
             yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
 
@@ -494,88 +485,72 @@ let emitDomain (proj:string) (s:Schema) =
                 let tableCap = t.FSharpName()
                 match t.PKey with
                 | None ->
-                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<{t.PKeyTypeName()}>\n"
+                    yield $"    Create{tableCap} : Create{tableCap} -> ApiResult<{t.PKeyTypeName()}>\n"
                 | Some _ ->
-                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<unit>\n"
-                yield $"    Read{tableCap}   : {t.PKeyTypeName()} -> TaskEither<{tableCap} option>\n"
-                yield $"    Update{tableCap} : Update{tableCap} -> TaskEither<unit>\n"
-                yield $"    Delete{tableCap} : {t.PKeyTypeName()} -> TaskEither<string>\n"
-                yield $"    List{tableCap} : BatchOffset -> TaskEither<{tableCap} []>\n"
+                    yield $"    Create{tableCap} : Create{tableCap} -> ApiResult<unit>\n"
+                yield $"    Read{tableCap}   : {t.PKeyTypeName()} -> ApiResult<{tableCap} option>\n"
+                yield $"    Update{tableCap} : Update{tableCap} -> ApiResult<unit>\n"
+                yield $"    Delete{tableCap} : {t.PKeyTypeName()} -> ApiResult<unit>\n"
+                yield $"    List{tableCap} : BatchOffset -> ApiResult<{tableCap} []>\n"
             yield $"}}\n"
 
             // -------------------------------------------
             // Client
             // -------------------------------------------
-            yield $"type Client(client : ClientBuilder) =\n"
-            yield $"    inherit ClientBuilder(Nested(\"{s.SName}\", client))\n"
             yield $"\n"
+            yield $"/// Typed client for the {s.SName} api.  basePath is relative to HttpClient.BaseAddress\n"
+            yield $"type Client(http : HttpClient, basePath : string) =\n"
             for t in s.Tables do
                 let tableCap = t.FSharpName()
                 let createReturnType =
                     match t.PKey with
                     | None -> t.PKeyTypeName()
                     | Some _ -> "unit"
-                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{createReturnType}> =\n"
-                yield $"        x.Post(\"{t.TName}/create\",doc)\n"
-                yield $"    member x.Read{tableCap}(docId:{t.PKeyTypeName()}) : TaskEither<{tableCap} option> =\n"
-                let needsPostForGet =
-                    match t.PKey with
-                    | None -> false
-                    | Some _ -> true
-                if needsPostForGet then
-                    yield $"        x.Post(\"{t.TName}/read\",docId)\n"
-                else
-                    yield $"        x.Get <| $\"{t.TName}/read/{{docId}}\"\n"
-                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<unit> =\n"
-                yield $"        x.Post(\"{t.TName}/update\",doc)\n"
-
-                yield $"    member x.Delete{tableCap}(docId:{t.PKeyTypeName()}) : TaskEither<string> =\n"
-                yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
-                // query parameter names must match the BatchOffset fields the server binds to
-                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap} []> =\n"
-                yield $"        match offset,batchSize with\n"
-                yield $"                 | Some o,Some b -> $\"{t.TName}/list?offset={{o}}&batchSize={{b}}\"\n"
-                yield $"                 | None ,Some b -> $\"{t.TName}/list?batchSize={{b}}\"\n"
-                yield $"                 | Some o,None -> $\"{t.TName}/list?offset={{o}}\"\n"
-                yield $"                 | None ,None -> $\"{t.TName}/list\"\n"
-                yield $"        |> x.Get\n"
+                let path = $"{{basePath}}/{t.TName}"
+                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : ApiResult<{createReturnType}> =\n"
+                yield $"        ApiClient.post http $\"{path}/create\" doc\n"
+                yield $"    member x.Read{tableCap}(docId:{t.PKeyTypeName()}) : ApiResult<{tableCap} option> =\n"
+                match t.PKey with
+                | Some _ -> yield $"        ApiClient.post http $\"{path}/read\" docId\n"
+                | None -> yield $"        ApiClient.get http $\"{path}/read/{{docId}}\"\n"
+                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : ApiResult<unit> =\n"
+                yield $"        ApiClient.post http $\"{path}/update\" doc\n"
+                yield $"    member x.Delete{tableCap}(docId:{t.PKeyTypeName()}) : ApiResult<unit> =\n"
+                yield $"        ApiClient.post http $\"{path}/delete\" docId\n"
+                // query parameter names must match what Handlers.withBatchOffset reads
+                yield $"    member x.List{tableCap}(?offset:int, ?batchSize:int) : ApiResult<{tableCap} []> =\n"
+                yield $"        ApiClient.get http (ApiClient.withQuery $\"{path}/list\" [ \"offset\", offset; \"batchSize\", batchSize ])\n"
         }
 
-    // Server side routing for the api.  Backend only (pulls in the web server libraries)
+    // Server side routing for the api (plain Giraffe).  Backend only.
     let apiServer =
         stringBuffer {
             yield $"namespace {projCap}.Api.{domain}\n"
             yield $"\n"
-            yield $"open Plough.WebApi.Server\n"
-            yield $"open Plough.WebApi.Server.Plain\n"
+            yield $"open Giraffe\n"
             yield $"\n"
             yield $"module Server =\n"
-            yield $"    let build<'ctx> (api : Api) : ApiServer<'ctx> = subRoute \"/{s.SName}\" <| choose [\n"
+            yield $"    module H = {projCap}.Api.Handlers\n"
+            yield $"\n"
+            yield $"    /// Routes for the {s.SName} api, mounted under /{s.SName}\n"
+            yield $"    let build (api : Api) : HttpHandler = subRoute \"/{s.SName}\" (choose [\n"
             yield $"        GET >=> choose [\n"
             for t in s.Tables do
                 let tableCap = t.FSharpName()
-                let canUseGet =
-                    match t.PKey with
-                    | None -> true
-                    | Some _ -> false
-                if canUseGet then
-                    yield $"            routef \"/{t.TName}/read/%%i\" (makeJSONHandlerWithArgAsync api.Read{tableCap})\n"
-                yield $"            route \"/{t.TName}/list\" >=> makeJSONHandlerWithQueryParamAsync api.List{tableCap} \n"
+                if t.PKey.IsNone then
+                    yield $"            routef \"/{t.TName}/read/%%i\" (H.withArg api.Read{tableCap})\n"
+                yield $"            route \"/{t.TName}/list\" >=> H.withBatchOffset api.List{tableCap}\n"
             yield $"        ]\n"
             yield $"        POST >=> choose [\n"
             for t in s.Tables do
                 let tableCap = t.FSharpName()
-                let needsPostForGet =
-                    match t.PKey with
-                    | None -> false
-                    | Some _ -> true
-                if needsPostForGet then
-                    yield $"            route \"/{t.TName}/read\" >=> makeJSONHandlerWithObjAsync api.Read{tableCap}\n"
-                yield $"            route \"/{t.TName}/create\" >=> makeJSONHandlerWithObjAsync api.Create{tableCap}\n"
-                yield $"            route \"/{t.TName}/update\" >=> makeJSONHandlerWithObjAsync api.Update{tableCap}\n"
-                yield $"            route \"/{t.TName}/delete\" >=> makeJSONHandlerWithObjAsync api.Delete{tableCap}\n"
+                if t.PKey.IsSome then
+                    yield $"            route \"/{t.TName}/read\" >=> H.withBody api.Read{tableCap}\n"
+                yield $"            route \"/{t.TName}/create\" >=> H.withBody api.Create{tableCap}\n"
+                yield $"            route \"/{t.TName}/update\" >=> H.withBody api.Update{tableCap}\n"
+                yield $"            route \"/{t.TName}/delete\" >=> H.withBody api.Delete{tableCap}\n"
             yield $"        ]\n"
-            yield $"    ]\n"
+            yield $"    ])\n"
         }
     {| Storage = storageCode
        ApiWireup = apiWireup
@@ -604,18 +579,21 @@ let generateMasterServerApiFile (proj:string) (d:Db) =
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
             yield $"    {schemaCap} = {projCap}.Domain.{schemaCap}.Api.api\n"
-        yield $"}}"
-
+        yield $"}}\n"
         yield $"\n"
+        yield $"/// Every schema's routes under /api - add this to your Giraffe app (app.UseGiraffe handler)\n"
+        yield $"let handler (api : {projCap}Api) : Giraffe.Core.HttpHandler =\n"
+        yield $"    Giraffe.Routing.subRoute \"/api\" (Giraffe.Core.choose [\n"
+        for s in d.Schemas do
+            let schemaCap = titleCase s.SName
+            yield $"        {schemaCap}.Server.build api.{schemaCap}\n"
+        yield $"    ])\n"
     }
 let generateMasterClientApiFile (proj:string) (d:Db) =
     let projCap = proj |> titleCase
     stringBuffer {
         yield $"namespace {projCap}.Api\n"
-        yield $"open Plough.WebApi.Client\n"
-        let dbCap = d.DName |> titleCase
-        //yield $"open   {dbCap}.Api\n"
-        //yield $"\n"
+        yield $"open System.Net.Http\n"
         // Definition of the master Api type with functions
         yield "/// Top level api type definition\n"
         yield $"type Api = {{\n"
@@ -623,11 +601,14 @@ let generateMasterClientApiFile (proj:string) (d:Db) =
             let schemaCap = titleCase s.SName
             yield $"    {schemaCap} : {schemaCap}.Api\n"
         yield $"}}\n"
-        yield $"type {projCap} (client : ApiClient) =\n"
-        yield $"    inherit ClientBuilder(Root(\"/api\", client))\n"
+        yield $"\n"
+        yield $"/// Typed client for the whole api.  Set http.BaseAddress to the server root (ending in /);\n"
+        yield $"/// basePath (default \"api\") is where the server mounted the api.\n"
+        yield $"type {projCap} (http : HttpClient, basePath : string) =\n"
+        yield $"    new (http : HttpClient) = {projCap}(http, \"api\")\n"
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
-            yield $"    member x.{schemaCap} = {schemaCap}.Client(x)\n"
+            yield $"    member x.{schemaCap} = {schemaCap}.Client(http, basePath + \"/{s.SName}\")\n"
 
         yield $"\n"
     }
@@ -796,6 +777,7 @@ let generate (proj:string) (folder:string) (d:Db) =
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
             yield $"  <PropertyGroup>\n"
             yield $"    <TargetFramework>{sharedTargetFramework}</TargetFramework>\n"
+            yield $"    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
             yield $"    <Compile Include=\"../{commonFile |> cleanSlash}\" />\n"
@@ -813,6 +795,10 @@ let generate (proj:string) (folder:string) (d:Db) =
     printfn $"Generating {apiProjPath|> cleanSlash}"
     File.WriteAllText(apiProjPath, apiProjContent)
 
+    // Giraffe handlers shared by all the schema server files (backend only)
+    let handlersFile = Path.Combine("Api", "ApiHandlers.fs")
+    File.WriteAllText(Path.Combine(folder, handlersFile), handlersFileSource proj)
+
     // Backend project: database access, service layer and server side api.  References the
     // shared project rather than recompiling its files so the types are identical on both sides.
     let fsProjContent =
@@ -820,9 +806,11 @@ let generate (proj:string) (folder:string) (d:Db) =
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
             yield $"  <PropertyGroup>\n"
             yield $"    <TargetFramework>net{dotnetVersion}</TargetFramework>\n"
+            yield $"    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
             yield $"    <Compile Include=\"{dbFile|> cleanSlash}\" />\n"
+            yield $"    <Compile Include=\"{handlersFile |> cleanSlash}\" />\n"
             for file in backendDomainFiles @ backendApiFiles do
                 yield $"    <Compile Include=\"{file|> cleanSlash}\" />\n"
             yield $"  </ItemGroup>\n"

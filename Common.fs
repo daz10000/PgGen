@@ -6,8 +6,8 @@ open System.Text.RegularExpressions
 /// Target framework (minus the "net" prefix) for generated backend projects
 let dotnetVersion = "10.0"
 /// Target framework for the generated shared (domain types + api contract + client) project.
-/// netstandard2.0 so it can be consumed by front ends / older runtimes, not just the backend.
-let sharedTargetFramework = "netstandard2.0"
+/// Same as the backend: consumers are .NET (backends, Blazor/MAUI) or Fable (which compiles source).
+let sharedTargetFramework = $"net{dotnetVersion}"
 
 let (|Regex|_|) pattern input =
     let m = Regex.Match(input, pattern)

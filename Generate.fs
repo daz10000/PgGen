@@ -81,6 +81,13 @@ let emitTable owner schema (table:Table) =
                     let name = $"uq_{table.TName}_{colsConcat}"
                     yield $"    CONSTRAINT {name} UNIQUE({colsConcatComma})"
 
+                // Composite / non Id primary key
+                match table.PKey with
+                | Some pk ->
+                    let colsConcatComma = String.Join(",",pk.Cols)
+                    yield $"    CONSTRAINT pk_{table.TName} PRIMARY KEY({colsConcatComma})"
+                | None -> ()
+
                 // Foreign reference constraints
                 for fr in table.FRefs do
                     let frCols = String.Join("_",fr.FromCols)
@@ -143,6 +150,8 @@ let emitDatabase (d:Db) =
     let errs = [|
         for schema in d.Schemas do
             for t in schema.Tables do
+                if t.PKey.IsSome && t.Cols |> List.exists (fun c -> c.CType = Id) then
+                    yield $"ERROR: table {schema.SName}.{t.TName} has both an Id column and a pKey - only one primary key is allowed"
                 for c in t.Cols do
                     if Reserved.isReserved c.CName then
                         yield $"ERROR: {c.CName} is a reserved keyword in postgres"
