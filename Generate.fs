@@ -174,6 +174,8 @@ let emitDatabase (d:Db) =
     let errs = [|
         for schema in d.Schemas do
             for t in schema.Tables do
+                for problem in ApiModel.validateQueries t do
+                    yield $"ERROR: {problem}"
                 if t.PKey.IsSome && t.Cols |> List.exists (fun c -> c.CType = Id) then
                     yield $"ERROR: table {schema.SName}.{t.TName} has both an Id column and a pKey - only one primary key is allowed"
                 for c in t.Cols do

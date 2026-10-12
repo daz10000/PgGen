@@ -129,6 +129,44 @@ task {
     let! _ = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "blue" }
     let! _ = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "green" }
 
+    // ---- layer 2: named queries
+    let! sid3 = client.Lab.CreateSample { Label = "s3"; Notes = Some "Some Notes Here"; Weight = None; Data = "{}"; Created = DateTime.UtcNow.AddMinutes 1.0; IdOrganism = orgId; Status = Status.InProgress }
+    check "create s3" (match sid3 with Ok _ -> true | _ -> false) sid3
+    let noFilters : SampleSearchQuery =
+        { IdOrganism = None; Status = None; CreatedFrom = None; CreatedTo = None; LabelStartsWith = None; NotesContains = None; After = None; Limit = None }
+    let labels (r:Result<SampleSearchResult, ApiError>) = match r with Ok p -> p.Items |> Array.map (fun x -> x.Label) |> Array.toList | Error e -> [ sprintf "%A" e ]
+    let! qAll = client.Lab.QuerySampleSearch noFilters
+    check "query, no filters, newest first" (labels qAll = [ "s3"; "zero"; "s1" ]) (labels qAll)
+    let! qEqAny = client.Lab.QuerySampleSearch { noFilters with IdOrganism = Some orgId; Status = Some [| Status.InProgress |] }
+    check "query Eq + AnyOf (enum array)" (labels qEqAny = [ "s3"; "s1" ]) (labels qEqAny)
+    let! qPrefix = client.Lab.QuerySampleSearch { noFilters with LabelStartsWith = Some "ze" }
+    check "query Prefix" (labels qPrefix = [ "zero" ]) (labels qPrefix)
+    let! qLikeChars = client.Lab.QuerySampleSearch { noFilters with LabelStartsWith = Some "%" }
+    check "query Prefix treats % literally" (labels qLikeChars = []) (labels qLikeChars)
+    let! qContains = client.Lab.QuerySampleSearch { noFilters with NotesContains = Some "notes" }
+    check "query Contains (case insensitive)" (labels qContains = [ "s3" ]) (labels qContains)
+    let! qRange = client.Lab.QuerySampleSearch { noFilters with CreatedFrom = Some (DateTime.UtcNow.AddDays 1.0) }
+    check "query Range" (labels qRange = []) (labels qRange)
+    let walkQuery () =
+        task {
+            let mutable after = None
+            let mutable acc = []
+            let mutable fin = false
+            while not fin do
+                match! client.Lab.QuerySampleSearch { noFilters with After = after; Limit = Some 1 } with
+                | Ok p ->
+                    acc <- acc @ (p.Items |> Array.toList |> List.map (fun x -> x.Label))
+                    match p.Next with
+                    | Some c -> after <- Some c
+                    | None -> fin <- true
+                | Error e -> failwithf "query failed %A" e
+            return acc
+        }
+    let! walked = walkQuery ()
+    check "query keyset paging on a sort column" (walked = [ "s3"; "zero"; "s1" ]) walked
+    let! byName = client.Lab.QueryOrganismByName { NameStartsWith = Some "bulk"; IsReference = None; After = None; Limit = None }
+    check "unordered query (key order)" (match byName with Ok p -> (p.Items |> Array.map (fun o -> o.Name)) = [| for i in 1 .. 5 -> $"bulk{i}" |] | _ -> false) byName
+
     let! rawPage = http.PostAsync("api/lab/organism/page", new StringContent("{}", Text.Encoding.UTF8, "application/json"))
     let! rawPageBody = rawPage.Content.ReadAsStringAsync()
     check "non F# client: empty json body uses defaults" (int rawPage.StatusCode = 200 && rawPageBody.Contains "\"Items\"") rawPageBody
@@ -137,7 +175,7 @@ task {
     let specDoc = Text.Json.JsonDocument.Parse(spec)
     let paths = [ for p in specDoc.RootElement.GetProperty("paths").EnumerateObject() -> p.Name ]
     check "openapi.json served, 3.1, lists the routes" (specDoc.RootElement.GetProperty("openapi").GetString() = "3.1.0"
-                                                     && [ "/lab/sample/page"; "/lab/sample/list_by_id_organism"; "/lab/sample/read_by_label"
+                                                     && [ "/lab/sample/page"; "/lab/sample/list_by_id_organism"; "/lab/sample/read_by_label"; "/lab/sample/query/search"
                                                           "/lab/sample_tag/page"; "/lab/organism/read/{id}"; "/lab/organism/count" ]
                                                         |> List.forall (fun p -> paths |> List.contains p)) paths
 

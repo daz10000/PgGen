@@ -27,7 +27,9 @@ The F# compile order in `PgGen.fsproj` matters.
 | `StringBuilder.fs` | `stringBuffer { yield ... }` computation expression, used by all generators |
 | `Generate.fs` | SQL emission: sequences, tables, enums, FKs, uniques, comments, owner, RLS policies |
 | `CodeStatic.fs` | Fixed templates for generated code: `Db.fs` (connection, `TenantRls`), shared `Common.fs` (`ApiError`, `ApiResult`, json options, `ApiClient` HttpClient helpers), backend `ApiHandlers.fs` (Giraffe handlers, exception → `ApiError` mapping), and the **generated package catalogue** (`generatedPackageVersions`, `sharedPackages`, `backendPackages`) |
-| `CodeGen.fs` | F# generation: `emitDomain` (per schema: Domain, Storage, Service, Api contract + client, ApiServer routes, Wireup), master api files, `.fsproj` files, `Directory.Packages.props` |
+| `ApiModel.fs` | **The model of the generated api**: `TypeRef`, `RecordDef`, `EnumDef`, `Operation` (name, route, verb, argument / result types, `OpKind`). `tableRecords` / `tableOperations` list everything generated per table; `validateQueries` checks named queries |
+| `OpenApi.fs` | OpenAPI 3.1 document built from `ApiModel` |
+| `CodeGen.fs` | F# generation: `emitDomain` (per schema: Domain types and Api / client / routes / wireup from `ApiModel`; Storage and Service per `OpKind`), master api files, `openapi.json`, `.fsproj` files, `Directory.Packages.props` |
 | `Build.fs` | The DSL functions users call: `db`, `schema`, `table`, `col`, `frefId`, `enum`, `enumDef`, `unique`, `pKey`, `rlsTenant`, `rlsOrganization` |
 | `Schema.fs` | `PgGen.ExtractSchema`: reverse engineering via `information_schema` / `pg_enum`, and emits a DSL `.fsx` |
 | `protein_demo.fsx` | Example spec that prints SQL (loads `bin/Debug/net10.0/PgGen.dll`) |
@@ -39,6 +41,13 @@ The F# compile order in `PgGen.fsproj` matters.
 
 ## How generation works
 
+- **`ApiModel` is the single source of truth** for generated types and operations. The domain
+  records, the `Api` contract record, the client members, the Giraffe routes, the wireup and
+  `openapi.json` are all emitted by iterating `tableRecords` / `tableOperations`. **To add an
+  operation**, add it to `tableOperations` (with a new `OpKind`), emit its storage SQL and service
+  function in `CodeGen.emitDomain` (the compiler's incomplete-match warning shows where), and the
+  rest follows. Records are emitted in list order, so a record must come after any record it
+  refers to.
 - The DSL builders in `Build.fs` return wrapper union cases (`TableItem`, `ColumnItem`, …). The
   parent builder unpacks them into the records in `Types.fs`.
 - Foreign keys (`frefId`) and enum columns (`enum`) are not stored in `Table.Cols`. They are in
@@ -53,7 +62,7 @@ The F# compile order in `PgGen.fsproj` matters.
   parameter is an `option`, and `None` is sent as SQL `NULL`. Non-null columns pass `Some x`. (An
   older version used sentinel values like `-1` / `''` for NULL, which silently turned real values
   into NULL. Don't reintroduce that.) The same mechanism is the basis for optional query filters
-  in `docs/proposal-queries-and-openapi.md`.
+  in named queries.
 - Update and delete return rows affected; the service turns 0 into `Error (NotFound ...)`. This
   also covers rows hidden by RLS, so their existence isn't revealed.
 - Storage uses the type provider's `TaskAsyncExecute`. The synchronous `Execute` blocks a thread,
@@ -79,11 +88,27 @@ The F# compile order in `PgGen.fsproj` matters.
   Api/<S>ApiWireup.fs        [backend] Api record implemented by Service
   Api/<P>ServerApi.fs        [backend] all schema apis + handler (everything under /api)
   Api/<P>ClientApi.fs        [shared]  root client <P>.Api.<P>(http, ?basePath = "api")
+  Api/openapi.json           OpenAPI 3.1, embedded in the backend, served at GET /api/openapi.json
 ```
 
+**Per-table operations** (see `ApiModel.tableOperations`):
+- CRUD;
+- `count`;
+- `page` (keyset);
+- `list_by_<fk>` for each generated FK;
+- `read_by_<cols>` for each `unique`;
+- `query/<name>` for each named query;
+- the original offset `list`.
+
 **Wire contract** (keep it language agnostic):
-- JSON uses `Json.options` in `Common.fs` (FSharp.SystemTextJson, fieldless unions as strings,
-  `None` as `null`). The server and the client must use the same options.
+- JSON settings live in `Common.fs`.
+  - `Json.options` is for **writing**: `None` as an explicit `null`.
+  - `Json.readOptions` is for **reading**: a missing or null option field is `None`, so non-F#
+    clients can omit optional fields. FSharp.SystemTextJson's `SkippableOptionFields.Always` was
+    tried and rejected, because it fails on explicit `null`.
+  - Enum cases carry `[<JsonName "<pg label>">]`, so the wire value is the Postgres label.
+- Keyset paging: requests have `After` (cursor) and `Limit`; results are `{ Items; Next }`. The
+  cursor is the key, or for named queries the sort columns plus the key.
 - Errors are a `Problem` (`Title` = `ApiError` case name, `Status`, `Detail`) with the matching
   HTTP status.
 - The routes and their HTTP shapes are documented in README's "The HTTP api". Changing them
@@ -168,6 +193,16 @@ not appear in search, but the id cannot be reused; hence `FSharp.PgGen`.
   *every* connection open and clears the tenant when none is set; that is what prevents tenant
   leakage across pooled connections. Don't make it conditional again. (`is_local=true` silently
   broke RLS: the setting ended with the implicit transaction of the `select set_config`.)
+- **Named query SQL** uses the optional-predicate pattern `(@p::type IS NULL OR col = @p::type)`
+  under `AllParametersOptional=true`.
+  - Cast the parameter at **every** use, not just in the `IS NULL` test. Npgsql sends enum arrays
+    as `text[]`, which gives "operator does not exist: <enum> = text" unless every occurrence is
+    cast.
+  - With prepared statements, Postgres may switch to a generic plan that is weak for optional
+    predicates. Watch query plans on big tables (mitigations are in the proposal doc).
+- Keyset paging with a sort order needs non-null sort columns in one direction (`validateQueries`
+  enforces this). Mixed directions would need an expanded OR condition instead of a row
+  comparison.
 - A table may have an `Id` column or a `pKey`, not both (`emitDatabase` rejects it). Read
   functions annotate their record type, because a `<T>PKey` record can have exactly the same fields.
 - **The project name must differ from schema names.** The root client type `<P>.Api.<P>` would

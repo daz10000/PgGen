@@ -373,6 +373,85 @@ let emitDomain (proj:string) (s:Schema) =
                     yield $"        return result |> Option.map {rowToRecord t}\n"
                     yield $"    }}\n"
                     yield $"\n"
+
+                // ====================================================
+                // Named queries: optional filters + keyset paging in one static statement
+                // ====================================================
+                for q in t.Queries do
+                    let col name = t.FullCols() |> List.find (fun c -> c.CName = name)
+                    let toEnum (c:Column) =
+                        match c.CType with
+                        | Enum e -> Some $"{e |> toFSharpLower}ToEnum"
+                        | _ -> None
+                    let sqlCol (c:Column) = postgrestify c.CName
+                    let filterSql, filterArgs =
+                        [ for f in q.Filters do
+                            let c = col (filterColumnName f)
+                            let typ = sqlParamType s.SName c
+                            let field = $"request.{c.FSharpName()}"
+                            let optArg (paramName:string) (fieldExpr:string) =
+                                match toEnum c with
+                                | Some conv -> $"{paramName}=({fieldExpr} |> Option.map {conv})"
+                                | None -> $"{paramName}={fieldExpr}"
+                            match f with
+                            | Eq _ ->
+                                yield $"(@eq_{c.CName}::{typ} IS NULL OR {sqlCol c} = @eq_{c.CName}::{typ})",
+                                      [ optArg $"eq_{c.CName}" field ]
+                            | AnyOf _ ->
+                                let arg =
+                                    match toEnum c with
+                                    | Some conv -> $"any_{c.CName}=({field} |> Option.map (Array.map {conv}))"
+                                    | None -> $"any_{c.CName}={field}"
+                                yield $"(@any_{c.CName}::{typ}[] IS NULL OR {sqlCol c} = ANY(@any_{c.CName}::{typ}[]))", [ arg ]
+                            | Range _ ->
+                                yield $"(@from_{c.CName}::{typ} IS NULL OR {sqlCol c} >= @from_{c.CName}::{typ}) AND (@to_{c.CName}::{typ} IS NULL OR {sqlCol c} < @to_{c.CName}::{typ})",
+                                      [ optArg $"from_{c.CName}" $"{field}From"; optArg $"to_{c.CName}" $"{field}To" ]
+                            | Prefix _ ->
+                                // starts_with rather than LIKE: no wildcard escaping needed
+                                yield $"(@prefix_{c.CName}::text IS NULL OR starts_with({sqlCol c}, @prefix_{c.CName}))",
+                                      [ $"prefix_{c.CName}={field}StartsWith" ]
+                            | Contains _ ->
+                                yield $"(@contains_{c.CName}::text IS NULL OR strpos(lower({sqlCol c}), lower(@contains_{c.CName})) > 0)",
+                                      [ $"contains_{c.CName}={field}Contains" ] ]
+                        |> List.unzip
+                    let pagingSql, pagingArgs, orderSql, nextCursor =
+                        match q.OrderBy with
+                        | [] -> keysetClause, keysetArgs, orderBy, nextKey
+                        | _ ->
+                            let cursorCols = queryCursorColumns t q
+                            let dir, cmp = if queryDescending q then "DESC", "<" else "ASC", ">"
+                            let first = cursorCols.Head
+                            let lhs = String.Join(", ", cursorCols |> List.map sqlCol)
+                            let rhs = String.Join(", ", cursorCols |> List.map (fun c -> $"@after_{c.CName}::{sqlParamType s.SName c}"))
+                            let args =
+                                [ for c in cursorCols ->
+                                    let conv = match toEnum c with Some f -> $" |> {f}" | None -> ""
+                                    $"after_{c.CName}=(request.After |> Option.map (fun cursor -> cursor.{c.FSharpName()}{conv}))" ]
+                            let fields = String.Join("; ", cursorCols |> List.map (fun c -> $"{c.FSharpName()} = last.{c.FSharpName()}"))
+                            $"(@after_{first.CName}::{sqlParamType s.SName first} IS NULL OR ({lhs}) {cmp} ({rhs}))",
+                            args,
+                            String.Join(", ", cursorCols |> List.map (fun c -> $"{sqlCol c} {dir}")),
+                            $"({{ {fields} }} : {queryCursorName t q})"
+                    let whereSql = String.Join("\n              AND ", filterSql @ [ pagingSql ])
+                    let args = String.Join(", ", List.concat filterArgs @ pagingArgs @ [ "limit=Some (int64 limit)" ])
+                    yield $"let query{fsharpName}{toFSharp q.QName} (request:{queryRequestName t q}) : Task<{queryResultName t q}> =\n"
+                    yield $"    task {{\n"
+                    yield $"        let limit = Paging.limit request.Limit\n"
+                    yield $"        use! conn = Db.openConnectionAsync()\n"
+                    yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                    yield $"        use cmd = Db.CreateCommand<\"\"\"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName}\n"
+                    yield $"            WHERE {whereSql}\n"
+                    yield $"            ORDER BY {orderSql} LIMIT @limit\"\"\",AllParametersOptional=true>(conn)\n"
+                    yield $"        let! rows = cmd.TaskAsyncExecute({args})\n"
+                    yield $"        let items = rows |> Seq.map {rowToRecord t} |> Array.ofSeq\n"
+                    yield $"        let next =\n"
+                    yield $"            if items.Length = limit then\n"
+                    yield $"                let last = items.[items.Length - 1]\n"
+                    yield $"                Some {nextCursor}\n"
+                    yield $"            else None\n"
+                    yield $"        return ({{ Items = items; Next = next }} : {queryResultName t q})\n"
+                    yield $"    }}\n"
+                    yield $"\n"
                 yield $"\n"
         }
     let apiWireup =
@@ -448,7 +527,7 @@ let emitDomain (proj:string) (s:Schema) =
                         yield wrap signature $"Storage.{op.FunctionName} request.Offset request.BatchSize"
                     | CountOp ->
                         yield wrap $"{op.FunctionName} () : ApiResult<{op.Result.FSharp()}>" $"Storage.{op.FunctionName} ()"
-                    | CreateOp | ReadOp | PageOp | ListByOp _ | ReadByOp _ ->
+                    | CreateOp | ReadOp | PageOp | ListByOp _ | ReadByOp _ | QueryOp _ ->
                         yield wrap signature $"Storage.{op.FunctionName} request"
         }
     // Api contract + client.  Compiled into the shared project, so it must not depend on server or

@@ -120,6 +120,94 @@ let uniqueRequestName (t:Table) (cols:Column list) =
     let suffix = cols |> List.map (fun c -> c.FSharpName()) |> String.concat ""
     $"{t.FSharpName()}By{suffix}"
 
+// ---------------------------------------------------------------------------------------------
+// Named queries
+// ---------------------------------------------------------------------------------------------
+
+let queryBaseName (t:Table) (q:NamedQuery) = $"{t.FSharpName()}{toFSharp q.QName}"
+let queryRequestName t q = $"{queryBaseName t q}Query"
+let queryCursorName t q = $"{queryBaseName t q}Cursor"
+let queryResultName t q = $"{queryBaseName t q}Result"
+
+let filterColumnName = function
+    | Eq c | AnyOf c | Range c | Prefix c | Contains c -> c
+let sortColumnName = function
+    | Asc c | Desc c -> c
+
+let private tryColumn (t:Table) (name:string) =
+    t.FullCols() |> List.tryFind (fun c -> c.CName = name)
+
+/// Problems with a table's named queries, as messages (empty = fine)
+let validateQueries (t:Table) =
+    [ for q in t.Queries do
+        let where = $"query '{q.QName}' on {t.TName}"
+        for f in q.Filters do
+            let name = filterColumnName f
+            match tryColumn t name with
+            | None -> yield $"{where}: no column '{name}'"
+            | Some c ->
+                let unsupported = c.Array || c.CType = Jsonb || c.CType = Blob
+                match f with
+                | Prefix _ | Contains _ when c.CType <> ColumnType.String || c.Array ->
+                    yield $"{where}: Prefix / Contains need a text column, '{name}' isn't"
+                | Range _ when unsupported || c.CType = Bool ->
+                    yield $"{where}: Range isn't supported on '{name}' ({c.CType})"
+                | (Eq _ | AnyOf _) when unsupported ->
+                    yield $"{where}: Eq / AnyOf aren't supported on array / json / blob column '{name}'"
+                | _ -> ()
+        let eqLike = q.Filters |> List.choose (function Eq c | AnyOf c -> Some c | _ -> None)
+        for dup in eqLike |> List.countBy id |> List.filter (fun (_, n) -> n > 1) |> List.map fst do
+            yield $"{where}: '{dup}' has more than one Eq / AnyOf filter"
+        for o in q.OrderBy do
+            let name = sortColumnName o
+            match tryColumn t name with
+            | None -> yield $"{where}: no column '{name}' to order by"
+            | Some c when c.Nullable ->
+                yield $"{where}: can't order by nullable column '{name}' (keyset paging needs non-null sort columns)"
+            | Some c when c.Array || c.CType = Jsonb || c.CType = Blob || c.CType = Bool ->
+                yield $"{where}: can't order by '{name}' ({c.CType})"
+            | Some _ -> ()
+        let directions = q.OrderBy |> List.map (function Asc _ -> true | Desc _ -> false) |> List.distinct
+        if directions.Length > 1 then
+            yield $"{where}: mixed Asc / Desc isn't supported yet (keyset paging needs one direction)"
+      for name, n in t.Queries |> List.countBy (fun q -> q.QName) do
+        if n > 1 then yield $"table {t.TName}: more than one query called '{name}'" ]
+
+let private columnOrFail (t:Table) (name:string) =
+    match tryColumn t name with
+    | Some c -> c
+    | None -> failwithf $"{t.TName} has no column '{name}'"
+
+/// Columns making up a query's paging cursor: the sort columns then the key (no sort = the key)
+let queryCursorColumns (t:Table) (q:NamedQuery) =
+    let sortCols = q.OrderBy |> List.map (sortColumnName >> columnOrFail t)
+    let keyCols = keyColumns t
+    sortCols @ (keyCols |> List.filter (fun k -> not (sortCols |> List.exists (fun c -> c.CName = k.CName))))
+
+let queryDescending (q:NamedQuery) =
+    match q.OrderBy with
+    | Desc _ :: _ -> true
+    | _ -> false
+
+let queryCursorType (t:Table) (q:NamedQuery) =
+    match q.OrderBy with
+    | [] -> keyType t
+    | _ -> TRecord (queryCursorName t q)
+
+/// Request fields for one filter
+let filterFields (t:Table) (f:QueryFilter) : Field list =
+    let c = columnOrFail t (filterColumnName f)
+    let baseType = (columnType c).StripOption()
+    let name = c.FSharpName()
+    match f with
+    | Eq _ -> [ { Name = name; Type = TOption baseType; Doc = Some $"{c.CName} equals this" } ]
+    | AnyOf _ -> [ { Name = name; Type = TOption (TArray baseType); Doc = Some $"{c.CName} is one of these" } ]
+    | Range _ ->
+        [ { Name = $"{name}From"; Type = TOption baseType; Doc = Some $"{c.CName} >= this" }
+          { Name = $"{name}To"; Type = TOption baseType; Doc = Some $"{c.CName} < this" } ]
+    | Prefix _ -> [ { Name = $"{name}StartsWith"; Type = TOption TString; Doc = Some $"{c.CName} starts with this" } ]
+    | Contains _ -> [ { Name = $"{name}Contains"; Type = TOption TString; Doc = Some $"{c.CName} contains this (case insensitive)" } ]
+
 let private pagingFields (t:Table) =
     [ { Name = "After"; Type = TOption (keyType t)
         Doc = Some "Only return rows after this key: pass the Next value of the previous page" }
@@ -161,7 +249,28 @@ let tableRecords (t:Table) : RecordDef list =
       for cols in uniqueLookups t do
         { Name = uniqueRequestName t cols
           Fields = cols |> List.map (fun c -> { columnField c with Type = (columnType c).StripOption() })
-          Doc = Some $"""Unique key ({String.Join(", ", cols |> List.map (fun c -> c.CName))}) of {t.TName}""" } ]
+          Doc = Some $"""Unique key ({String.Join(", ", cols |> List.map (fun c -> c.CName))}) of {t.TName}""" }
+      for q in t.Queries do
+        let cursorType = queryCursorType t q
+        // cursor first: the request and result records refer to it
+        if not q.OrderBy.IsEmpty then
+            { Name = queryCursorName t q
+              Fields = queryCursorColumns t q |> List.map (fun c -> { columnField c with Type = (columnType c).StripOption(); Doc = None })
+              Doc = Some $"Position in the results of query '{q.QName}'" }
+        { Name = queryRequestName t q
+          Fields =
+            (q.Filters |> List.collect (filterFields t))
+            @ [ { Name = "After"; Type = TOption cursorType
+                  Doc = Some "Only return rows after this cursor: pass the Next value of the previous page" }
+                { Name = "Limit"; Type = TOption TInt
+                  Doc = Some $"Maximum number of rows (default {defaultPageLimit}, at most {maxPageLimit})" } ]
+          Doc = Some $"Query '{q.QName}' on {t.TName}; every filter is optional" }
+        { Name = queryResultName t q
+          Fields =
+            [ { Name = "Items"; Type = TArray (TRecord name); Doc = None }
+              { Name = "Next"; Type = TOption cursorType
+                Doc = Some "Cursor to pass as After for the next page; null when there are no more rows" } ]
+          Doc = Some $"A page of results of query '{q.QName}'" } ]
 
 // ---------------------------------------------------------------------------------------------
 // Operations
@@ -192,6 +301,7 @@ type OpKind =
     | PageOp
     | ListByOp of Column
     | ReadByOp of Column list
+    | QueryOp of NamedQuery
 
 type Operation = {
     /// Api record field / client member, e.g. ReadSample
@@ -239,6 +349,9 @@ let tableOperations (t:Table) : Operation list =
         let suffix = cols |> List.map (fun c -> c.FSharpName()) |> String.concat ""
         let routeSuffix = cols |> List.map (fun c -> c.CName) |> String.concat "_"
         op $"Read{name}By{suffix}" (path $"read_by_{routeSuffix}") Post JsonBody (TRecord (uniqueRequestName t cols))
-            (TOption row) $"Read a {t.TName} by its unique {routeSuffix} (null if not found)" (ReadByOp cols) ]
+            (TOption row) $"Read a {t.TName} by its unique {routeSuffix} (null if not found)" (ReadByOp cols)
+      for q in t.Queries do
+        op $"Query{name}{toFSharp q.QName}" (path $"query/{q.QName}") Post JsonBody (TRecord (queryRequestName t q))
+            (TRecord (queryResultName t q)) $"Query '{q.QName}' on {t.TName} (all filters optional, keyset paging)" (QueryOp q) ]
 
 let schemaOperations (s:Schema) = s.Tables |> List.collect tableOperations

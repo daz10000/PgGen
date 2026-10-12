@@ -1,7 +1,20 @@
 # Proposal: richer queries, and OpenAPI
 
-Status: **proposal, for discussion** (Oct 2026). Nothing here is implemented yet. Update this file
-as decisions are made.
+Status (Oct 2026): **OpenAPI, layer 1 and layer 2 are implemented.** Layers 3 and 4 and soft
+delete are still proposals.
+
+Decisions taken:
+- keyset paging for new operations (offset `list` kept for compatibility);
+- POST with a JSON body for lookups, pages and named queries;
+- a separate `/count` route;
+- `openapi.json` produced with the generated code (not hand-maintained), embedded in the backend
+  at build time and served at `/api/openapi.json`.
+
+Differences from the sketches below:
+- FK lookups are `POST /<table>/list_by_<fk_column>` with a `<Table>By<Fk>Page` body.
+- Unique lookups are `POST /<table>/read_by_<cols>`.
+- Enum values on the wire are Postgres labels.
+- Named queries need non-null, single-direction sort columns.
 
 ## Where we are
 

@@ -195,6 +195,52 @@ pKey [ "id_sample"; "tag" ]                         // composite key for tables 
 Names are checked against Postgres and F# reserved words. `Generate.emitDatabase` throws if a
 column name is a Postgres keyword.
 
+### Indexes
+
+```fsharp
+index [ "created" ]                                 // CREATE INDEX ix_<table>_created ...
+```
+
+Foreign key columns are indexed automatically, because Postgres doesn't index them and the
+generated `list_by_<fk>` lookups need it. The exception is a column that already leads an index,
+a unique constraint or the primary key.
+
+### Named queries
+
+Declare the queries your front ends need. Each becomes one SQL statement that is type-checked
+against the database at build time, plus an api operation, a client method and an OpenAPI entry:
+
+```fsharp
+table "sample" [] [
+    ...
+    query "search" [
+        Filter [ Eq "id_organism"; AnyOf "status"; Range "created"; Prefix "label"; Contains "notes" ]
+        OrderBy [ Desc "created" ] ]
+]
+```
+
+| Filter       | Request field(s)                 | Matches                                   |
+|--------------|----------------------------------|-------------------------------------------|
+| `Eq c`       | `C : T option`                   | `c = value`                               |
+| `AnyOf c`    | `C : T [] option`                | `c` is one of the values                  |
+| `Range c`    | `CFrom`, `CTo : T option`        | `CFrom <= c < CTo`                        |
+| `Prefix c`   | `CStartsWith : string option`    | text starts with the value (no wildcards) |
+| `Contains c` | `CContains : string option`      | text contains the value, case insensitive |
+
+Every filter is optional at run time: leave it `None` (or omit it from the JSON) and it isn't
+applied. Results use keyset paging (below). The cursor is the sort columns plus the primary key, so
+`OrderBy` columns must be non-null and sorted in one direction. Without `OrderBy`, rows come back
+in key order. Problems such as unknown columns, a `Prefix` on a non-text column, or mixed sort
+directions are reported by `Generate.emitDatabase`.
+
+For the query above the client gets:
+
+```fsharp
+client.Lab.QuerySampleSearch
+    { IdOrganism = Some 7; Status = Some [| Status.InProgress |]; CreatedFrom = None; CreatedTo = None
+      LabelStartsWith = None; NotesContains = Some "urgent"; After = None; Limit = Some 50 }
+```
+
 ## Generated SQL
 
 For the `sample` table above, `Generate.emitDatabase` produces (abridged):
@@ -234,7 +280,7 @@ generated/
 │   └── Db.fs                        connection, transactions, RLS helpers               [backend]
 ├── Acme.Domain.Lab/                 one folder per schema
 │   ├── LabDomain.fs                 records: Sample, CreateSample, UpdateSample, enums  [shared]
-│   ├── LabStorage.fs                create/read/update/list, SQL checked at compile time
+│   ├── LabStorage.fs                CRUD, lookups and queries, SQL checked at compile time
 │   └── LabService.fs                business logic goes here (thin wrappers to start)
 └── Api/
     ├── AcmeApi.fsproj               shared project: domain + contract + client
@@ -243,7 +289,8 @@ generated/
     ├── LabApiServer.fs              Giraffe routes for the Api                  [backend]
     ├── LabApiWireup.fs              Api record implemented by the service layer [backend]
     ├── AcmeServerApi.fs             all schemas' apis + one handler for /api    [backend]
-    └── AcmeClientApi.fs             root client with one member per schema      [shared]
+    ├── AcmeClientApi.fs             root client with one member per schema      [shared]
+    └── openapi.json                 OpenAPI 3.1 description, served at /api/openapi.json
 ```
 
 **Shared project** (`Api/<Project>Api.fsproj`). Holds the domain records, the api contract and
@@ -262,19 +309,33 @@ Both projects target `net10.0`.
 
 Each table gets these routes, mounted under `/api/<schema>`:
 
-| Route                                  | Method | Body / result                                   |
-|----------------------------------------|--------|-------------------------------------------------|
-| `/<table>/create`                      | POST   | `Create<Table>` → new id                        |
-| `/<table>/read/{id}`                   | GET    | → `<Table>` or `null`                           |
+| Route                                  | Method | Body → result                                             |
+|----------------------------------------|--------|-----------------------------------------------------------|
+| `/<table>/create`                      | POST   | `Create<Table>` → new id                                  |
+| `/<table>/read/{id}`                   | GET    | → `<Table>` or `null`                                     |
 | `/<table>/read`                        | POST   | composite key tables: `<Table>PKey` → `<Table>` or `null` |
-| `/<table>/update`                      | POST   | `Update<Table>` → `null`                        |
-| `/<table>/delete`                      | POST   | id (or `<Table>PKey`) → `null`                  |
-| `/<table>/list?offset=&batchSize=`     | GET    | → array; both parameters optional               |
+| `/<table>/update`                      | POST   | `Update<Table>` → `null`                                  |
+| `/<table>/delete`                      | POST   | id (or `<Table>PKey`) → `null`                            |
+| `/<table>/count`                       | GET    | → number of rows                                          |
+| `/<table>/page`                        | POST   | `<Table>Page` → `<Table>PageResult` (keyset paging)       |
+| `/<table>/list_by_<fk>`                | POST   | one per foreign key: `<Table>By<Fk>Page` → `<Table>PageResult` |
+| `/<table>/read_by_<cols>`              | POST   | one per `unique`: `<Table>By<Cols>` → `<Table>` or `null` |
+| `/<table>/query/<name>`                | POST   | one per named query: `<Table><Name>Query` → `<Table><Name>Result` |
+| `/<table>/list?offset=&batchSize=`     | GET    | → array (offset paging; prefer `page` for large tables)   |
+
+**Keyset paging.** Page requests take `After` (a cursor, or null for the first page) and
+`Limit` (default 100, at most 1000). Results are `{ "Items": [...], "Next": cursor-or-null }`.
+To fetch the next page, pass `Next` back as `After`; `Next` is null on the last page. Unlike
+offsets, this stays fast however deep you page, and rows aren't skipped or repeated when other
+rows are inserted. For `page` and `list_by_<fk>` the cursor is the primary key. For named
+queries it is the sort columns plus the key.
 
 The wire format is plain JSON, so any language can call the api:
 
-- Record fields keep their F# names (`{"Id":1,"Label":"s1","Notes":null,"Status":"InProgress"}`).
-- `option` values are `null` when absent, and enums are strings.
+- Record fields keep their F# names (`{"Id":1,"Label":"s1","Notes":null,"Status":"in_progress"}`).
+- Enums are strings holding the Postgres enum label.
+- `option` values are written as `null`. In requests, an optional field may be `null` or left
+  out.
 - `Timestamp` values are ISO 8601. `Jsonb` columns are strings that contain JSON.
 - Update and delete return `NotFound` (404) when no row matched, including rows hidden by
   row level security.
@@ -290,6 +351,20 @@ The wire format is plain JSON, so any language can call the api:
 
 Every operation returns `ApiResult<'T>`, which is a `Task<Result<'T, ApiError>>`. That holds on
 the server (service layer) and in the client.
+
+### OpenAPI
+
+`generated/Api/openapi.json` is an OpenAPI 3.1 description of every route and type. It is produced
+by the same `CodeGen.generate` run, from the same model as the code, so it can't drift from it.
+The backend embeds it at build time and serves it at `GET /api/openapi.json`.
+
+Use it for:
+- Swagger UI or Scalar documentation pages;
+- generating TypeScript (or other) clients, e.g. with `openapi-typescript` or `orval`;
+- contract tests.
+
+It declares no authentication scheme, because authentication belongs to your host application.
+Add one there if your tooling needs it.
 
 ### Using it at runtime
 
@@ -414,9 +489,9 @@ The same functionality is available from code as `PgGen.ExtractSchema.extractSch
 
 ## Limitations and roadmap
 
-- Retrieval is read-by-key and list only. Richer queries (lookups by foreign key or unique
-  column, filtering, sorting, keyset paging, counts) and OpenAPI generation are proposed in
-  [docs/proposal-queries-and-openapi.md](docs/proposal-queries-and-openapi.md).
+- Named queries cover filtering and sorting on one table. Joins and aggregates (the proposed
+  SQL-file escape hatch), a generic filter endpoint, and mixed sort directions are not done yet;
+  see [docs/proposal-queries-and-openapi.md](docs/proposal-queries-and-openapi.md).
 - Deletes are hard deletes; soft delete is proposed in the same document.
 - Foreign keys are always integer references to `id`.
 - `FComment`, `ERComment` and `CUpdate` are accepted but not emitted yet.

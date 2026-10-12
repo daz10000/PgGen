@@ -20,6 +20,7 @@ let smoke =
                 col "external_id" Guid [ Nullable ]
                 col "aliases" String [ Nullable; Array ]
                 col "photo" Blob [ Nullable ]
+                query "by_name" [ Filter [ Prefix "name"; Eq "is_reference" ] ]       // unordered: key order
             ]
             table "sample" [ Comment "a physical sample" ] [
                 col "id" Id []
@@ -32,6 +33,9 @@ let smoke =
                 enum "status" []
                 unique [ "label" ]                            // -> read_by_label
                 index [ "created" ]
+                query "search" [
+                    Filter [ Eq "id_organism"; AnyOf "status"; Range "created"; Prefix "label"; Contains "notes" ]
+                    OrderBy [ Desc "created" ] ]
             ]
             table "invoice" [ rlsTenant "tenant_id" ] [   // Guid but no Timestamp -> needs open System
                 col "id" Id []
