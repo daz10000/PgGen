@@ -42,7 +42,7 @@ let emitDomain (proj:string) (s:Schema) =
             let needsSystem =
                 [for t in s.Tables do
                     for c in t.Cols do
-                        if c.CType = Timestamp then
+                        if c.CType = Timestamp || c.CType = ColumnType.Guid then // DateTime / Guid live in System
                             yield true] |> Seq.isEmpty |> not
 
             if needsSystem then
@@ -212,12 +212,12 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"let {fSharpVar}ToEnum(v:{fSharpType}) =\n"
                 yield $"    match v with\n"
                 for v in e.EValues do
-                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{v}\n"
+                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{Reserved.quoteFSharpReserved v}\n"
                 yield $"\n"
                 yield $"let {fSharpVar}FromEnum(e:Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}) =\n"
                 yield $"    match e with\n"
                 for v in e.EValues do
-                    yield $"    | Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{v} -> {fSharpType}.{v |> toFSharp}\n"
+                    yield $"    | Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{Reserved.quoteFSharpReserved v} -> {fSharpType}.{v |> toFSharp}\n"
                 yield $"    | x -> failwithf $\"Impossible {e.EName} enum value {{x}}\"\n"
                 yield $"\n"
 
@@ -476,14 +476,15 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"    }}\n"
                 yield $"\n"
         }
+    // Api contract + client.  Compiled into the shared project, so it must not depend on server or
+    // database libraries.  A namespace (rather than a module) lets the server routing live in a
+    // separate backend-only file while still being addressable as {domain}.Server
     let apiDef =
         stringBuffer {
-            yield $"module {projCap}.Api.{domain}\n"
+            yield $"namespace {projCap}.Api.{domain}\n"
             yield $"\n"
             yield $"open Plough.ControlFlow\n"
             yield $"open Plough.WebApi.Client\n"
-            yield $"open Plough.WebApi.Server\n"
-            yield $"open Plough.WebApi.Server.Plain\n"
             yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
 
@@ -503,11 +504,52 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"}}\n"
 
             // -------------------------------------------
-            // Server api
+            // Client
             // -------------------------------------------
+            yield $"type Client(client : ClientBuilder) =\n"
+            yield $"    inherit ClientBuilder(Nested(\"{s.SName}\", client))\n"
+            yield $"\n"
+            for t in s.Tables do
+                let tableCap = t.FSharpName()
+                let createReturnType =
+                    match t.PKey with
+                    | None -> t.PKeyTypeName()
+                    | Some _ -> "unit"
+                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{createReturnType}> =\n"
+                yield $"        x.Post(\"{t.TName}/create\",doc)\n"
+                yield $"    member x.Read{tableCap}(docId:{t.PKeyTypeName()}) : TaskEither<{tableCap} option> =\n"
+                let needsPostForGet =
+                    match t.PKey with
+                    | None -> false
+                    | Some _ -> true
+                if needsPostForGet then
+                    yield $"        x.Post(\"{t.TName}/read\",docId)\n"
+                else
+                    yield $"        x.Get <| $\"{t.TName}/read/{{docId}}\"\n"
+                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<unit> =\n"
+                yield $"        x.Post(\"{t.TName}/update\",doc)\n"
+
+                yield $"    member x.Delete{tableCap}(docId:{t.PKeyTypeName()}) : TaskEither<string> =\n"
+                yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
+                // query parameter names must match the BatchOffset fields the server binds to
+                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap} []> =\n"
+                yield $"        match offset,batchSize with\n"
+                yield $"                 | Some o,Some b -> $\"{t.TName}/list?offset={{o}}&batchSize={{b}}\"\n"
+                yield $"                 | None ,Some b -> $\"{t.TName}/list?batchSize={{b}}\"\n"
+                yield $"                 | Some o,None -> $\"{t.TName}/list?offset={{o}}\"\n"
+                yield $"                 | None ,None -> $\"{t.TName}/list\"\n"
+                yield $"        |> x.Get\n"
+        }
+
+    // Server side routing for the api.  Backend only (pulls in the web server libraries)
+    let apiServer =
+        stringBuffer {
+            yield $"namespace {projCap}.Api.{domain}\n"
+            yield $"\n"
+            yield $"open Plough.WebApi.Server\n"
+            yield $"open Plough.WebApi.Server.Plain\n"
+            yield $"\n"
             yield $"module Server =\n"
-
-
             yield $"    let build<'ctx> (api : Api) : ApiServer<'ctx> = subRoute \"/{s.SName}\" <| choose [\n"
             yield $"        GET >=> choose [\n"
             for t in s.Tables do
@@ -534,47 +576,11 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"            route \"/{t.TName}/delete\" >=> makeJSONHandlerWithObjAsync api.Delete{tableCap}\n"
             yield $"        ]\n"
             yield $"    ]\n"
-
-            // -------------------------------------------
-            // Client
-            // -------------------------------------------
-            yield $"type Client(client : ClientBuilder) =\n"
-            yield $"    inherit ClientBuilder(Nested(\"{s.SName}\", client))\n"
-            yield $"\n"
-            for t in s.Tables do
-                let tableCap = t.FSharpName()
-                let createReturnType =
-                    match t.PKey with
-                    | None -> t.PKeyTypeName()
-                    | Some _ -> "unit"
-                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{createReturnType}> =\n"
-                yield $"        x.Post(\"{t.TName}/create\",doc)\n"
-                yield $"    member x.Read{tableCap}(docId:int) : TaskEither<{tableCap} option> =\n"
-                let needsPostForGet =
-                    match t.PKey with
-                    | None -> false
-                    | Some _ -> true
-                if needsPostForGet then
-                    yield $"        x.Post(\"{t.TName}/read\",docId)\n"
-                else
-                    yield $"        x.Get <| $\"{t.TName}/read/{{docId}}\"\n"
-                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<unit> =\n"
-                yield $"        x.Post(\"{t.TName}/update\",doc)\n"
-
-                yield $"    member x.Delete{tableCap}(docId:int) : TaskEither<string> =\n"
-                yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
-                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap} []> =\n"
-                yield $"        match offset,batchSize with\n"
-                yield $"                 | Some o,Some b -> $\"{t.TName}/list?offset={{offset}}&batch={{batchSize}}\"\n"
-                yield $"                 | None ,Some b -> $\"{t.TName}/list?batch={{batchSize}}\"\n"
-                yield $"                 | Some o,None -> $\"{t.TName}/list?offset={{offset}}\"\n"
-                yield $"                 | None ,None -> $\"{t.TName}/list\"\n"
-                yield $"        |> x.Get\n"
-            // yield $"        }}\n"
         }
     {| Storage = storageCode
        ApiWireup = apiWireup
        ApiDef = apiDef
+       ApiServer = apiServer
        Domain = domainCode
        ServiceLayer = serviceLayer|}
 
@@ -629,6 +635,44 @@ let generateMasterClientApiFile (proj:string) (d:Db) =
 
 let cleanSlash (path:string) =
     path.Replace("\\","/")
+
+/// Nearest file called name in folder or any of its parents (mirrors how MSBuild finds Directory.*.props)
+let rec private findFileAbove (folder:string) (name:string) =
+    let candidate = Path.Combine(folder, name)
+    if File.Exists candidate then Some candidate
+    else
+        match Directory.GetParent folder with
+        | null -> None
+        | parent -> findFileAbove parent.FullName name
+
+/// Generated projects use NuGet Central Package Management.  Write a Directory.Packages.props
+/// next to them unless the surrounding repo already manages versions centrally, in which case we
+/// leave that file alone and tell the user which versions it needs.
+let private writePackageProps (folder:string) =
+    let fullFolder = Path.GetFullPath folder
+    let ownProps = Path.Combine(fullFolder, "Directory.Packages.props")
+    let isGenerated (path:string) = File.ReadAllText(path).Contains(generatedPropsMarker)
+    match findFileAbove fullFolder "Directory.Packages.props" with
+    | Some existing when not (isGenerated existing) ->
+        printfn $"Found {existing |> cleanSlash}, not generating Directory.Packages.props."
+        printfn "Make sure it contains versions for these packages:"
+        for line in packageVersionLines () do
+            printfn $"{line}"
+    | _ ->
+        printfn $"Generating {ownProps |> cleanSlash}"
+        File.WriteAllText(ownProps, directoryPackagesPropsSource ())
+
+/// Older versions of PgGen generated paket files.  We don't delete user files, but say so.
+let private warnAboutPaket (folder:string) =
+    let leftovers =
+        [ "paket.dependencies"; "paket.references"; "paket.lock"; ".paket" ]
+        |> List.filter (fun f -> File.Exists(Path.Combine(folder, f)) || Directory.Exists(Path.Combine(folder, f)))
+    if not leftovers.IsEmpty then
+        let names = String.Join(", ", leftovers)
+        printfn $"WARNING: {folder |> cleanSlash} contains paket files from an older PgGen ({names})."
+        printfn "         Generated projects now use NuGet central package management; these can be deleted"
+        printfn "         (along with the paket entry in .config/dotnet-tools.json)."
+
 let generate (proj:string) (folder:string) (d:Db) =
     let projCap = titleCase proj
     ensureFolder folder
@@ -650,13 +694,19 @@ let generate (proj:string) (folder:string) (d:Db) =
             let serviceFile = Path.Combine(schemaSubFolder,$"{schemaCap}Service.fs")
             let domainFile = Path.Combine(schemaSubFolder,$"{schemaCap}Domain.fs")
             let apiDefFile = Path.Combine("Api",$"{schemaCap}Api.fs")
+            let apiServerFile = Path.Combine("Api",$"{schemaCap}ApiServer.fs")
             let apiWireupFile = Path.Combine("Api",$"{schemaCap}ApiWireup.fs")
 
             yield domainFile
             yield apiDefFile // api uses data structures from domainFile
             yield storageFile
             yield serviceFile
+            yield apiServerFile // server routing needs the Api type from apiDefFile
             yield apiWireupFile
+
+            let fullApiServerFile = Path.Combine(folder, apiServerFile)
+            printfn $"  generating {fullApiServerFile|> cleanSlash}"
+            File.WriteAllText(fullApiServerFile, code.ApiServer)
 
             let fullStorageFile = Path.Combine(folder, storageFile)
             printfn $"  generating {fullStorageFile|> cleanSlash}"
@@ -713,13 +763,58 @@ let generate (proj:string) (folder:string) (d:Db) =
     ]
 
 
-    let apiFiles,nonApiFiles = generatedFileNames |> List.partition (fun x -> x.StartsWith("Api/") || x.StartsWith("Api\\"))
+    let commonFile, dbFile =
+        match auxFileNames with
+        | [ c; d ] -> c, d
+        | x -> failwithf $"Internal error: unexpected aux files {x}"
 
-    let fileNames = auxFileNames @ nonApiFiles @ apiFiles
     // might be a good idea long term to strongly type these different file types since we need different subsets
-    let domainFiles = nonApiFiles |> List.filter (fun x -> x.EndsWith("Domain.fs"))
+    let isSharedFile (file:string) =
+        file.EndsWith("Domain.fs")
+        || (file.EndsWith("Api.fs") && (file.StartsWith("Api/") || file.StartsWith("Api\\"))
+            && not (file.EndsWith($"{projCap}ServerApi.fs")))
+    let isApiFolderFile (file:string) = file.StartsWith("Api/") || file.StartsWith("Api\\")
 
-    // write out an fsproj file with all the individual files in it
+    let sharedFiles = generatedFileNames |> List.filter isSharedFile
+    let backendFiles = generatedFileNames |> List.filter (isSharedFile >> not)
+    // the api folder files go last since they depend on the service layer
+    let backendApiFiles, backendDomainFiles = backendFiles |> List.partition isApiFolderFile
+
+    let packageRefs (packages:string list) =
+        stringBuffer {
+            yield $"  <ItemGroup>\n"
+            for p in packages do
+                yield $"    <PackageReference Include=\"{p}\" />\n" // versions live in Directory.Packages.props
+            yield $"  </ItemGroup>\n"
+        }
+
+    // Shared project: domain types, api contract and client.  No server / database dependencies so
+    // that front ends and other non backend consumers can reference it.
+    let apiProjName = $"{projCap}Api.fsproj"
+    let apiProjContent =
+        stringBuffer {
+            yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+            yield $"  <PropertyGroup>\n"
+            yield $"    <TargetFramework>{sharedTargetFramework}</TargetFramework>\n"
+            yield $"  </PropertyGroup>\n"
+            yield $"  <ItemGroup>\n"
+            yield $"    <Compile Include=\"../{commonFile |> cleanSlash}\" />\n"
+            for file in sharedFiles do
+                if isApiFolderFile file then
+                    yield $"    <Compile Include=\"{file[4..]|> cleanSlash}\" />\n" // remove Api/ prefix
+                else
+                    yield $"    <Compile Include=\"../{file|> cleanSlash}\" />\n"
+            yield $"    <Compile Include=\"{projCap}ClientApi.fs\" />\n"
+            yield $"  </ItemGroup>\n"
+            yield packageRefs sharedPackages
+            yield $"</Project>\n"
+        }
+    let apiProjPath = Path.Combine(folder,"Api",apiProjName)
+    printfn $"Generating {apiProjPath|> cleanSlash}"
+    File.WriteAllText(apiProjPath, apiProjContent)
+
+    // Backend project: database access, service layer and server side api.  References the
+    // shared project rather than recompiling its files so the types are identical on both sides.
     let fsProjContent =
         stringBuffer {
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
@@ -727,54 +822,26 @@ let generate (proj:string) (folder:string) (d:Db) =
             yield $"    <TargetFramework>net{dotnetVersion}</TargetFramework>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
-            for file in fileNames do
+            yield $"    <Compile Include=\"{dbFile|> cleanSlash}\" />\n"
+            for file in backendDomainFiles @ backendApiFiles do
                 yield $"    <Compile Include=\"{file|> cleanSlash}\" />\n"
             yield $"  </ItemGroup>\n"
-            yield $"  <Import Project=\".paket\\Paket.Restore.targets\" />"
+            yield $"  <ItemGroup>\n"
+            yield $"    <ProjectReference Include=\"Api/{apiProjName}\" />\n"
+            yield $"  </ItemGroup>\n"
+            yield packageRefs backendPackages
             yield $"</Project>\n"
         }
     let fsProjPath = Path.Combine(folder, $"{projCap}.Backend.fsproj")
     printfn $"Generating {fsProjPath|> cleanSlash}"
     File.WriteAllText(fsProjPath, fsProjContent)
 
-    // write out a client api fsproj file with all the individual files in it
-    let apiProjContent =
-        stringBuffer {
-            yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
-            yield $"  <PropertyGroup>\n"
-            yield $"    <TargetFramework>net10.0</TargetFramework>\n"
-            yield $"  </PropertyGroup>\n"
-            yield $"  <ItemGroup>\n"
-            yield $"    <Compile Include=\"../Common/Common.fs\" />\n"
-            for file in domainFiles do
-                yield $"    <Compile Include=\"../{file|> cleanSlash}\" />\n"
-            for file in apiFiles do
-                if file.EndsWith("Wireup.fs") ||
-                    file.EndsWith($"{projCap}ServerApi.fs") then
-                    () // skip these files
-                else
-                    yield $"    <Compile Include=\"{file[4..]|> cleanSlash}\" />\n" // remove Api/ prefix
-            yield $"    <Compile Include=\"{projCap}ClientApi.fs\" />\n"
-            yield $"  </ItemGroup>\n"
-            yield $"  <Import Project=\"..\\.paket\\Paket.Restore.targets\" />"
-            yield $"</Project>\n"
-        }
-    let apiProjPath = Path.Combine(folder,"Api",$"{projCap}Api.fsproj")
-    printfn $"Generating {apiProjPath|> cleanSlash}"
-    File.WriteAllText(apiProjPath, apiProjContent)
-
 
     let compileTimeDbFile = Path.Combine(folder,compileTimeDbFile)
     File.WriteAllText(compileTimeDbFile,$"Host=127.0.0.1;Username=read_write;Password=readwrite;Database={d.DName};Pooling=true")
 
-    let paketDepsFile = Path.Combine(folder, "paket.dependencies")
-    let paketRefsFile = Path.Combine(folder, "paket.references")
-    let configFolder = Path.Combine(folder, ".config")
-    ensureFolder configFolder
-    File.WriteAllText(Path.Combine(configFolder, "dotnet-tools.json"), dotnetToolsJson)
-
-    File.WriteAllText(paketDepsFile, paketFile)
-    File.WriteAllText(paketRefsFile, paketReferencesFile)
+    writePackageProps folder
+    warnAboutPaket folder
 
 (* future work
 

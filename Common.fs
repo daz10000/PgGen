@@ -3,8 +3,11 @@ module PgGen.Common
 open System.Text.RegularExpressions
 
 
-let dotnetVersion = "9.0"
-let paketVersion = "9.0.2" // has to match dotnet version
+/// Target framework (minus the "net" prefix) for generated backend projects
+let dotnetVersion = "10.0"
+/// Target framework for the generated shared (domain types + api contract + client) project.
+/// netstandard2.0 so it can be consumed by front ends / older runtimes, not just the backend.
+let sharedTargetFramework = "netstandard2.0"
 
 let (|Regex|_|) pattern input =
     let m = Regex.Match(input, pattern)

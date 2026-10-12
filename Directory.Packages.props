@@ -1,0 +1,16 @@
+<Project>
+  <!--
+    NuGet Central Package Management (CPM) for the PgGen library itself.
+    Projects reference packages without a Version; versions live here.
+    (The *generated* projects get their own Directory.Packages.props - see CodeStatic.fs.)
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Lowest FSharp.Core we compile against; consumers may use anything newer. -->
+    <PackageVersion Include="FSharp.Core" Version="9.0.300" />
+    <PackageVersion Include="Npgsql" Version="9.0.3" />
+  </ItemGroup>
+</Project>

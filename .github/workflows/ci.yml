@@ -1,0 +1,51 @@
+name: CI
+
+# Build + pack on every push / PR.  Pushing a tag like v0.2.0 also publishes FSharp.PgGen 0.2.0
+# to nuget.org (needs a NUGET_API_KEY repository secret).
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "args=-p:Version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # smoke test: the demo script loads bin/Debug/net10.0/PgGen.dll and emits SQL
+      - run: dotnet build -c Debug
+      - run: dotnet fsi protein_demo.fsx > /dev/null
+
+      - run: dotnet build -c Release ${{ steps.version.outputs.args }}
+
+      - run: dotnet pack -c Release --no-build -o artifacts ${{ steps.version.outputs.args }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: artifacts/*
+
+      - name: Publish to nuget.org
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

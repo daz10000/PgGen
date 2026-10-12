@@ -160,9 +160,8 @@ let emitDatabase (d:Db) =
                             yield $"ERROR: {en} used for enum column reference name is a reserved keyword in postgres"
     |]
     if errs.Length > 0 then
-        for e in errs do
-            printfn $"{e}"
-        exit 1
+        // raise rather than exit so library consumers (servers, test runners) can handle it
+        failwith (String.Join("\n", errs))
 
     stringBuffer {
         yield "-- ==================================================\n"
