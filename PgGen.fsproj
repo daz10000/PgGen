@@ -13,7 +13,7 @@
     <!-- NB: the id "PgGen" on nuget.org is owned by an unrelated project (all versions unlisted, so it
          does not show up in search, but it cannot be reused), hence FSharp.PgGen -->
     <PackageId>FSharp.PgGen</PackageId>
-    <Version>0.1.0</Version>
+    <!-- Version and PackageReleaseNotes come from RELEASE_NOTES.md (see Directory.Build.props) -->
     <Authors>Darren Platt</Authors>
     <Description>F# DSL for describing a Postgres database. Generates SQL DDL (tables, enums, foreign keys, row level security) and an F# backend (typed storage layer, service layer, web api and client), and can reverse engineer an existing database into the DSL.</Description>
     <PackageTags>fsharp;postgres;postgresql;codegen;schema;ddl;sql;giraffe</PackageTags>

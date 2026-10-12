@@ -15,6 +15,10 @@ let smoke =
                 col "id_taxon" Int32 [ Nullable ]
                 col "taxonomy" String [ Array ]
                 col "genome_size" Id64 [ Nullable ]
+                col "is_reference" Bool [ Nullable ]       // nullable types that had no sentinel
+                col "external_id" Guid [ Nullable ]
+                col "aliases" String [ Nullable; Array ]
+                col "photo" Blob [ Nullable ]
             ]
             table "sample" [ Comment "a physical sample" ] [
                 col "id" Id []

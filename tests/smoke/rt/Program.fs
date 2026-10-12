@@ -33,7 +33,7 @@ let check name cond detail =
     if cond then printfn "PASS %s" name else (failures <- failures + 1; printfn "FAIL %s: %A" name detail)
 
 task {
-    let! orgId = client.Lab.CreateOrganism { Name = "E. coli"; IdTaxon = Some 562; Taxonomy = [| "Bacteria"; "Proteobacteria" |]; GenomeSize = None }
+    let! orgId = client.Lab.CreateOrganism { Name = "E. coli"; IdTaxon = Some 562; Taxonomy = [| "Bacteria"; "Proteobacteria" |]; GenomeSize = None; IsReference = None; ExternalId = None; Aliases = None; Photo = None }
     check "create organism" (match orgId with Ok i -> i > 0 | _ -> false) orgId
     let orgId = match orgId with Ok i -> i | _ -> failwith "stop"
 
@@ -43,10 +43,11 @@ task {
     let! missing = client.Lab.ReadOrganism 999999
     check "read missing -> Ok None" (missing = Ok None) missing
 
-    let! upd = client.Lab.UpdateOrganism { Id = orgId; Name = "Escherichia coli"; IdTaxon = None; Taxonomy = [||]; GenomeSize = Some 4_600_000_000L }
+    let extId = Guid.NewGuid()
+    let! upd = client.Lab.UpdateOrganism { Id = orgId; Name = "Escherichia coli"; IdTaxon = None; Taxonomy = [||]; GenomeSize = Some 4_600_000_000L; IsReference = Some false; ExternalId = Some extId; Aliases = Some [| "K-12" |]; Photo = Some [| 1uy; 2uy; 255uy |] }
     check "update organism" (upd = Ok ()) upd
     let! org2 = client.Lab.ReadOrganism orgId
-    check "update persisted (None -> NULL, big int64)" (match org2 with Ok (Some o) -> o.Name = "Escherichia coli" && o.IdTaxon = None && o.GenomeSize = Some 4_600_000_000L | _ -> false) org2
+    check "update persisted (None -> NULL, big int64)" (match org2 with Ok (Some o) -> o.Name = "Escherichia coli" && o.IdTaxon = None && o.GenomeSize = Some 4_600_000_000L && o.IsReference = Some false && o.ExternalId = Some extId && o.Aliases = Some [| "K-12" |] && o.Photo = Some [| 1uy; 2uy; 255uy |] | _ -> false) org2
 
     let! sid = client.Lab.CreateSample { Label = "s1"; Notes = None; Weight = Some 1.25M; Data = """{"a":1}"""; Created = DateTime.UtcNow; IdOrganism = orgId; Status = Status.InProgress }
     check "create sample (enum, decimal, jsonb)" (match sid with Ok _ -> true | _ -> false) sid
@@ -54,6 +55,12 @@ task {
     let! s = client.Lab.ReadSample sid
     check "read sample enum/decimal" (match s with Ok (Some x) -> x.Status = Status.InProgress && x.Weight = Some 1.25M | _ -> false) s
 
+    let! sid0 = client.Lab.CreateSample { Label = "zero"; Notes = Some ""; Weight = Some 0.0M; Data = "{}"; Created = DateTime.UtcNow; IdOrganism = orgId; Status = Status.DoneX }
+    let! s0 = match sid0 with Ok i -> client.Lab.ReadSample i | Error e -> Threading.Tasks.Task.FromResult(Error e)
+    check "Some \"\" and Some 0.0M are not stored as NULL" (match s0 with Ok (Some x) -> x.Notes = Some "" && x.Weight = Some 0.0M | _ -> false) s0
+    let! org3 = client.Lab.CreateOrganism { Name = "neg"; IdTaxon = Some -1; Taxonomy = [||]; GenomeSize = Some -1L; IsReference = None; ExternalId = None; Aliases = None; Photo = None }
+    let! o3 = match org3 with Ok i -> client.Lab.ReadOrganism i | Error e -> Threading.Tasks.Task.FromResult(Error e)
+    check "Some -1 is not stored as NULL" (match o3 with Ok (Some o) -> o.IdTaxon = Some -1 && o.GenomeSize = Some -1L | _ -> false) o3
     let! raw = http.GetStringAsync($"api/lab/sample/read/{sid}")
     printfn "  wire format: %s" raw
     check "enum on the wire is a plain string" (raw.Contains "\"Status\":\"InProgress\"") raw
@@ -73,8 +80,19 @@ task {
     let! all = client.Lab.ListSample()
     check "list without paging" (match all with Ok xs -> xs.Length >= 1 | _ -> false) all
 
-    let! del = client.Lab.DeleteOrganism orgId
-    check "delete stub -> Unexpected" (match del with Error (Unexpected _) -> true | _ -> false) del
+    let! delParent = client.Lab.DeleteOrganism orgId
+    check "delete row still referenced -> Conflict" (match delParent with Error (Conflict _) -> true | _ -> false) delParent
+    let! delTag = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "red" }
+    check "delete composite key row" (delTag = Ok ()) delTag
+    let! delTag2 = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "red" }
+    check "delete again -> NotFound" (match delTag2 with Error (NotFound _) -> true | _ -> false) delTag2
+    let! delSample = client.Lab.DeleteSample sid
+    let! goneSample = client.Lab.ReadSample sid
+    check "delete sample, then read -> None" (delSample = Ok () && goneSample = Ok None) (delSample, goneSample)
+    let! delMissing = client.Lab.DeleteOrganism 999999
+    check "delete missing -> NotFound" (match delMissing with Error (NotFound _) -> true | _ -> false) delMissing
+    let! updMissing = client.Lab.UpdateOrganism { Id = 999999; Name = "x"; IdTaxon = None; Taxonomy = [||]; GenomeSize = None; IsReference = None; ExternalId = None; Aliases = None; Photo = None }
+    check "update missing -> NotFound" (match updMissing with Error (NotFound _) -> true | _ -> false) updMissing
 
     let! badQ = http.GetAsync("api/lab/organism/list?offset=abc")
     let! badQBody = badQ.Content.ReadAsStringAsync()
@@ -101,6 +119,10 @@ task {
     check "tenant B cannot see it" (seenB = Ok None) seenB
     let! spoof = (clientFor tenantB).Lab.CreateInvoice { TenantId = tenantA; Amount = 1M }
     check "tenant B cannot insert as A" (match spoof with Error _ -> true | _ -> false) spoof
+    let! delB = (clientFor tenantB).Lab.DeleteInvoice invId
+    check "tenant B cannot delete A's row -> NotFound" (match delB with Error (NotFound _) -> true | _ -> false) delB
+    let! delA = (clientFor tenantA).Lab.DeleteInvoice invId
+    check "tenant A deletes its row" (delA = Ok ()) delA
 }
 |> fun t -> t.Wait()
 app.StopAsync().Wait()

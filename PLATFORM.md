@@ -33,6 +33,8 @@ The F# compile order in `PgGen.fsproj` matters.
 | `protein_demo.fsx` | Example spec that prints SQL (loads `bin/Debug/net10.0/PgGen.dll`) |
 | `schema2fs.fsx` | Argu CLI around `ExtractSchema` |
 | `tests/smoke/` | End-to-end test: `run.sh` generates a project, loads it into a fresh database, compiles it and runs a live HTTP round trip with the generated client (`rt/Program.fs`) |
+| `RELEASE_NOTES.md` | FAKE-style release notes. The first `### x.y.z` heading **is the package version** (read by `Directory.Build.props`) |
+| `docs/proposal-queries-and-openapi.md` | Proposal: query framework (FK/unique lookups, named queries, SQL files, generic filters), OpenAPI generation, soft delete |
 | `docs/plough-removal.md` | Why and how Plough was replaced by plain Giraffe, and the downstream-consumer analysis |
 
 ## How generation works
@@ -47,11 +49,13 @@ The F# compile order in `PgGen.fsproj` matters.
   - FK columns are `id_<table>`.
   - F# names come from `toFSharp` (`sample_tag` becomes `SampleTag`). F# reserved words get an `X`
     appended in some places and backtick quoting in others (enum values in Storage).
-- Nullable columns in Storage use a sentinel hack: the type provider cannot take `option`
-  parameters, so `None` is sent as e.g. `-1` or `''`, and the SQL turns it back into `NULL`. A
-  real value equal to the sentinel also becomes `NULL`. Only some types have sentinels; the others
-  `failwith` at generation time. The SQL-side sentinel fixes the parameter type that Postgres
-  infers, so `Id64` needs `-1::bigint`.
+- Create and update commands use the type provider's `AllParametersOptional=true`: every
+  parameter is an `option`, and `None` is sent as SQL `NULL`. Non-null columns pass `Some x`. (An
+  older version used sentinel values like `-1` / `''` for NULL, which silently turned real values
+  into NULL. Don't reintroduce that.) The same mechanism is the basis for optional query filters
+  in `docs/proposal-queries-and-openapi.md`.
+- Update and delete return rows affected; the service turns 0 into `Error (NotFound ...)`. This
+  also covers rows hidden by RLS, so their existence isn't revealed.
 - Storage uses the type provider's `TaskAsyncExecute`. The synchronous `Execute` blocks a thread,
   and it wraps database errors in `AggregateException`, which hides `PostgresException` from the
   error mapping.
@@ -133,8 +137,28 @@ defaults) can create databases, and it drops and recreates `pggen_smoke`. It:
 It prints `PASS` / `FAIL` lines and exits non-zero on failure. Extend `spec.fsx` and `Program.fs`
 when you add generator features. It isn't in CI yet; that would need a Postgres service container.
 
-**Release:** set `<Version>` in `PgGen.fsproj`, or push a tag `vX.Y.Z`. `.github/workflows/ci.yml`
-builds, runs the demo, packs, and on tags pushes to nuget.org using the `NUGET_API_KEY` secret.
+**Versioning and release notes** follow FAKE's `RELEASE_NOTES.md` convention:
+
+```
+### 0.2.0 - 2026-11-01
+* Added: ...
+* Fix: ...
+
+### 0.1.0 - 2026-10-12
+* ...
+```
+
+- The newest entry is at the top. `Directory.Build.props` reads the first `### x.y.z` heading as
+  `Version` (pre-release suffixes like `0.3.0-beta.1` work) and its bullets as
+  `PackageReleaseNotes`. There is no `<Version>` in the fsproj.
+- **Every user-visible change adds a bullet to the top entry.** If the top entry is already
+  released (tagged), start a new entry above it, and bump the version per semver: breaking change
+  to the DSL or generated code → minor while < 1.0, major after.
+- Check with `dotnet msbuild PgGen.fsproj -getProperty:Version -getProperty:PackageReleaseNotes`.
+
+**Release:** replace `Unreleased` in the top heading with the date, commit, and push tag `vX.Y.Z`.
+`.github/workflows/ci.yml` checks the tag matches RELEASE_NOTES.md, builds, runs the demo, packs,
+and pushes to nuget.org using the `NUGET_API_KEY` secret.
 The id `PgGen` on nuget.org is owned by an unrelated project. Its versions are unlisted, so it does
 not appear in search, but the id cannot be reused; hence `FSharp.PgGen`.
 
@@ -157,12 +181,13 @@ not appear in search, but the id cannot be reused; hence `FSharp.PgGen`.
 - The generated `Timestamp` column SQL embeds `default now()` in the type string (`ColumnType.Sql`).
 - `FComment`, `ERComment`, `CUpdate` and `TableAttr.TBD` are accepted by the DSL but ignored by
   generators.
-- Generated delete operations are stubs that raise `NotImplementedException` (a 500 over HTTP).
+- Deletes are hard deletes. Deleting a row that is still referenced returns `Conflict` (FK
+  violation).
 
 ## Checklist for changes
 
 - Generator change → `./tests/smoke/run.sh` (see above).
 - New generated dependency → add it to `CodeStatic.generatedPackageVersions`, and to
   `backendPackages` unless it is genuinely front-end safe.
-- User-visible DSL or output change → update `README.md`.
+- User-visible DSL or output change → update `README.md` **and add a bullet to `RELEASE_NOTES.md`**.
 - Architecture, layout, process or gotcha change → update **this file**.

@@ -224,55 +224,22 @@ let emitDomain (proj:string) (s:Schema) =
             for t in s.Tables do
                 let colsExceptKey = t.FullCols() |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
                 let colNamesExceptKey = String.Join(",",[for c in colsExceptKey  -> postgrestify c.CName])
-                let placeHolderDefs =
-                    [for c in colsExceptKey  ->
-                                            if c.Nullable then
-                                                let defaultVPostgres =
-                                                    match c.CType with
-                                                    | Int32 -> "-1"
-                                                    | String -> "''"
-                                                    | Timestamp -> "'0001-01-01'::timestamptz"
-                                                    | Jsonb -> "'{}'::jsonb"
-                                                    | Float -> "0.0"
-                                                    | Enum x -> $"NULL::{x}"
-                                                    | Decimal -> "0.0"
-                                                    | Id64 -> "-1::bigint" // a plain -1 makes postgres infer an int parameter
-                                                    | _ -> failwithf $"Not implemented - default value for {c.CType}"
-                                                {| CName = c.CName ; CValue = $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)" |}
-                                            else
-                                                {| CName = c.CName ; CValue = $"@{c.CName}" |}
-                                    ]
-                let insertPlaceHolders = String.Join(",",[for c in placeHolderDefs  -> c.CValue])
-                let updatePlaceHolders = String.Join(",",[for c in placeHolderDefs  -> $"{c.CName}={c.CValue}"])
+                // Create / update commands use AllParametersOptional=true: every parameter is an option
+                // and None is sent as SQL NULL, so nullable columns need no special handling.
+                let insertPlaceHolders = String.Join(",",[for c in colsExceptKey -> $"@{c.CName}"])
+                let updatePlaceHolders = String.Join(",",[for c in colsExceptKey -> $"{postgrestify c.CName}=@{c.CName}"])
                 let fullPostgresCols =
                     String.Join(",",[for c in t.FullCols()  -> postgrestify c.CName])
                 let nonPKParametersForCall =
                     String.Join(",",[for c in colsExceptKey  ->
-                                        let optionalNullHack =
-                                            if c.Nullable then
-                                                if c.Array then
-                                                    failwith $"Not implemented - nullable array columns"
-                                                let defaultV =
-                                                    match c.CType with
-                                                    | Int32 -> "-1"
-                                                    | String -> "\"\""
-                                                    | Timestamp -> "\"0001-01-01\""
-                                                    | Jsonb -> "\"{}\""
-                                                    | Float -> "0.0"
-                                                    | Enum x -> "NULL"
-                                                    | Decimal -> "0.0M"
-                                                    | Id64 -> "-1L"
-                                                    | _ -> failwithf $"Not implemented - default value for {c.CType}"
-                                                $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
-                                            else
-                                                $"request.{c.FSharpName()}"
-                                        let optionalEnumConversion =
-                                            match c.CType with
-                                            | Enum e ->
-                                                let fSharpVar = e |> toFSharpLower
-                                                $"({optionalNullHack}|> {fSharpVar}ToEnum)"
-                                            | _ -> $"{optionalNullHack}"
-                                        $"{postgrestify c.CName}={optionalEnumConversion}"])
+                                        let field = $"request.{c.FSharpName()}"
+                                        let value =
+                                            match c.CType, c.Nullable with
+                                            | Enum e, true -> $"({field} |> Option.map {e |> toFSharpLower}ToEnum)"
+                                            | Enum e, false -> $"Some ({field} |> {e |> toFSharpLower}ToEnum)"
+                                            | _, true -> field
+                                            | _, false -> $"Some {field}"
+                                        $"{postgrestify c.CName}={value}"])
 
                 let fsharpName = t.FSharpName()
                 let returning,readWhereClause,parameters =
@@ -295,7 +262,7 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        do! TenantRls.applyAmbientToConnection conn\n"
                 yield $"        use cmd = Db.CreateCommand<\"\"\"INSERT INTO {s.SName}.{t.TName} (\n"
                 yield $"            {colNamesExceptKey}) \n                    VALUES({insertPlaceHolders}) {returning}\n"
-                yield $"                                   \"\"\",SingleRow=true>(conn)\n"
+                yield $"                                   \"\"\",SingleRow=true,AllParametersOptional=true>(conn)\n"
                 yield $"        let! newId = cmd.TaskAsyncExecute({nonPKParametersForCall})\n"
                 match t.PKey with
                 | None ->
@@ -342,7 +309,7 @@ let emitDomain (proj:string) (s:Schema) =
                         [   yield nonPKParametersForCall // already have these from insert
                             match t.PKey with // updates also need the primary key columns
                             | None ->
-                                yield $"id=request.Id"
+                                yield $"id=Some request.Id"
                             | Some cols ->
                                 // already covered I think by the nonPKParametersForCall
                                 //for col in cols.Cols do
@@ -352,17 +319,21 @@ let emitDomain (proj:string) (s:Schema) =
 
                 yield $"                {updatePlaceHolders}\n"
                 yield $"          WHERE {readWhereClause}\n"
-                yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let! _ = cmd.TaskAsyncExecute({updateParameters})\n"
-                yield $"        return ()\n"
+                yield $"                                   \"\"\",AllParametersOptional=true>(conn)\n"
+                yield $"        // rows affected: 0 when the row doesn't exist (or RLS hides it)\n"
+                yield $"        return! cmd.TaskAsyncExecute({updateParameters})\n"
                 yield $"    }}\n"
                 yield $"\n"
                 // ====================================================
                 // Delete code
                 // ====================================================
-                yield $"let delete{fsharpName} (id:{t.PKeyTypeName()}) : Task<unit> =\n"
+                yield $"let delete{fsharpName} (request:{t.PKeyTypeName()}) : Task<int> =\n"
                 yield $"    task {{\n"
-                yield $"        return raise (System.NotImplementedException \"delete{fsharpName} is not implemented yet\")\n"
+                yield $"        use! conn = Db.openConnectionAsync()\n"
+                yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                yield $"        use cmd = Db.CreateCommand<\"\"\"DELETE FROM {s.SName}.{t.TName} WHERE {readWhereClause}\"\"\">(conn)\n"
+                yield $"        // rows affected: 0 when the row doesn't exist (or RLS hides it)\n"
+                yield $"        return! cmd.TaskAsyncExecute({parameters})\n"
                 yield $"    }}"
                 yield $"\n\n"
 
@@ -464,8 +435,33 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"// -------------------------------------------\n"
                 yield wrap $"create{tableCap} (request:Create{tableCap}) : ApiResult<{createReturnType}>" $"Storage.create{tableCap} request"
                 yield wrap $"read{tableCap} (request:{t.PKeyTypeName()}) : ApiResult<{tableCap} option>" $"Storage.read{tableCap} request"
-                yield wrap $"update{tableCap} (request:Update{tableCap}) : ApiResult<unit>" $"Storage.update{tableCap} request"
-                yield wrap $"delete{tableCap} (request:{t.PKeyTypeName()}) : ApiResult<unit>" $"Storage.delete{tableCap} request"
+                // update / delete: zero rows affected means there was nothing (visible) to change
+                let wrapRowCount (signature:string) (call:string) (keyExpr:string) =
+                    stringBuffer {
+                        yield $"let {signature} =\n"
+                        yield $"    task {{\n"
+                        yield $"        let! rows = {call}\n"
+                        yield $"        if rows = 0 then\n"
+                        yield $"            let key = {keyExpr}\n"
+                        yield $"            return Error (NotFound $\"{t.TName} {{key}} not found\")\n"
+                        yield $"        else\n"
+                        yield $"            return Ok ()\n"
+                        yield $"    }}\n"
+                        yield $"\n"
+                    }
+                // key as text for the NotFound message, e.g. 42 or 7/red for composite keys
+                let compositeKeyExpr (pk:PKey) =
+                    String.Join(" + \"/\" + ", [ for c in pk.Cols -> $"string request.{c |> toFSharp}" ])
+                let updateKeyExpr =
+                    match t.PKey with
+                    | None -> "string request.Id"
+                    | Some pk -> compositeKeyExpr pk
+                let deleteKeyExpr =
+                    match t.PKey with
+                    | None -> "string request"
+                    | Some pk -> compositeKeyExpr pk
+                yield wrapRowCount $"update{tableCap} (request:Update{tableCap}) : ApiResult<unit>" $"Storage.update{tableCap} request" updateKeyExpr
+                yield wrapRowCount $"delete{tableCap} (request:{t.PKeyTypeName()}) : ApiResult<unit>" $"Storage.delete{tableCap} request" deleteKeyExpr
                 yield wrap $"list{tableCap} (batchOffset:BatchOffset) : ApiResult<{tableCap} []>" $"Storage.list{tableCap} batchOffset.Offset batchOffset.BatchSize"
         }
     // Api contract + client.  Compiled into the shared project, so it must not depend on server or

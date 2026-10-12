@@ -268,7 +268,7 @@ Each table gets these routes, mounted under `/api/<schema>`:
 | `/<table>/read/{id}`                   | GET    | → `<Table>` or `null`                           |
 | `/<table>/read`                        | POST   | composite key tables: `<Table>PKey` → `<Table>` or `null` |
 | `/<table>/update`                      | POST   | `Update<Table>` → `null`                        |
-| `/<table>/delete`                      | POST   | id (not implemented yet)                        |
+| `/<table>/delete`                      | POST   | id (or `<Table>PKey`) → `null`                  |
 | `/<table>/list?offset=&batchSize=`     | GET    | → array; both parameters optional               |
 
 The wire format is plain JSON, so any language can call the api:
@@ -276,6 +276,8 @@ The wire format is plain JSON, so any language can call the api:
 - Record fields keep their F# names (`{"Id":1,"Label":"s1","Notes":null,"Status":"InProgress"}`).
 - `option` values are `null` when absent, and enums are strings.
 - `Timestamp` values are ISO 8601. `Jsonb` columns are strings that contain JSON.
+- Update and delete return `NotFound` (404) when no row matched, including rows hidden by
+  row level security.
 - Errors use an HTTP status code and a problem body, for example
   `{"Title":"Conflict","Status":409,"Detail":"duplicate key value violates unique constraint ..."}`.
 
@@ -412,21 +414,19 @@ The same functionality is available from code as `PgGen.ExtractSchema.extractSch
 
 ## Limitations and roadmap
 
-- Delete operations are generated as stubs (they return a 500), and there is no soft delete yet.
-- Nullable columns go through the type provider as sentinel values: `-1`, `''`, `0.0` and
-  `0001-01-01`. A *real* value equal to the sentinel is stored as `NULL`. Nullable `Bool`, `Guid`
-  and `Blob` columns, and nullable arrays, are not supported by the storage generator yet. The SQL
-  is fine.
+- Retrieval is read-by-key and list only. Richer queries (lookups by foreign key or unique
+  column, filtering, sorting, keyset paging, counts) and OpenAPI generation are proposed in
+  [docs/proposal-queries-and-openapi.md](docs/proposal-queries-and-openapi.md).
+- Deletes are hard deletes; soft delete is proposed in the same document.
 - Foreign keys are always integer references to `id`.
 - `FComment`, `ERComment` and `CUpdate` are accepted but not emitted yet.
 - Reverse engineering does not recover composite primary keys (`pKey`) or unique constraints.
 - There is no index support, and no migrations: PgGen generates `CREATE` scripts.
-- There is no OpenAPI or TypeScript output yet, although the JSON api is plain enough to call by
-  hand.
 
 ## Contributing
 
-Start with [PLATFORM.md](PLATFORM.md), the architecture and maintenance guide.
+Start with [PLATFORM.md](PLATFORM.md), the architecture and maintenance guide. Changes are
+listed in [RELEASE_NOTES.md](RELEASE_NOTES.md), which also sets the package version.
 
 ## License
 

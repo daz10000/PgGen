@@ -21,4 +21,5 @@ dotnet fsi "$here/spec.fsx" "$work"
 
 dotnet build "$work/out/Api/SmokeApi.fsproj" -v quiet   # shared project: no database needed
 cp -r "$here/rt" "$work/rt"
-dotnet run --project "$work/rt/rt.fsproj" 2>&1 | grep -E "^(PASS|FAIL|[0-9]+ failures)"
+dotnet build "$work/rt/rt.fsproj" -v quiet              # backend: type-checked against pggen_smoke
+dotnet run --no-build --project "$work/rt/rt.fsproj" 2>&1 | grep -E "^(PASS|FAIL|[0-9]+ failures)"
