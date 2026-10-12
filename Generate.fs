@@ -42,6 +42,25 @@ let private emitRls owner schema (table:Table) =
             yield "\n"
         }
 
+/// Explicit indexes, plus one per generated foreign key column (postgres doesn't index FKs, and
+/// the generated list_by_<fk> lookups need it) unless an index / unique / primary key already
+/// starts with that column
+let indexedColumns (table:Table) =
+    let leading =
+        [ for i in table.Indexes -> i.Cols
+          for u in table.Uniques -> u.Cols
+          match table.PKey with
+          | Some pk -> yield pk.Cols
+          | None -> () ]
+        |> List.choose List.tryHead
+        |> Set.ofList
+    let fkCols =
+        [ for fr in table.FRefs do
+            if fr.Generate then
+                let col = fr.Name |> Option.defaultValue $"id_{fr.ToTable}"
+                if not (leading.Contains col) then yield [ col ] ]
+    [ for i in table.Indexes -> i.Cols ] @ fkCols
+
 let emitTable owner schema (table:Table) =
     stringBuffer {
         let hasId = table.Cols |> List.exists (fun c -> c.CType = Id)
@@ -111,6 +130,11 @@ let emitTable owner schema (table:Table) =
             | None -> ()
         yield $"ALTER TABLE {schema}.{table.TName} OWNER TO {owner};\n"
         yield "\n"
+        for cols in indexedColumns table do
+            let colsConcat = String.Join("_",cols)
+            let colsConcatComma = String.Join(",",cols)
+            yield $"CREATE INDEX ix_{table.TName}_{colsConcat} ON {schema}.{table.TName} ({colsConcatComma});\n"
+        if not (indexedColumns table).IsEmpty then yield "\n"
         yield emitRls owner schema table
     }
 

@@ -51,6 +51,11 @@ and EnumRefAttr =
     /// Mark the enum column as nullable
     | ENullable
 
+/// Secondary index (CREATE INDEX)
+and TableIndex = {
+    Cols : string list
+}
+
 and PKey = {
     Cols : string list
 }
@@ -63,6 +68,7 @@ and Table = {
         FRefs : ForeignRef list
         ERefs : EnumRef list
         Uniques : Unique list
+        Indexes : TableIndex list
         PKey : PKey option
 } with
     member x.FSharpName() =
@@ -180,6 +186,7 @@ type TableBodyItem =
     | ForeignRef of ForeignRef
     | EnumRef of EnumRef
     | PKey of PKey
+    | IndexItem of TableIndex
 
 
 

@@ -203,6 +203,13 @@ type ApiError =
 /// Result of every api operation, on both the server and the client
 type ApiResult<'T> = Task<Result<'T, ApiError>>
 
+/// Keyset paging limits
+module Paging =
+    let defaultLimit = __DEFAULT_LIMIT__
+    let maxLimit = __MAX_LIMIT__
+    let limit (requested:int option) =
+        requested |> Option.defaultValue defaultLimit |> max 1 |> min maxLimit
+
 /// Error body returned by the server (RFC 7807 style, readable from any language)
 type Problem = {
     Title : string
@@ -233,13 +240,23 @@ module ApiError =
         | "Conflict", _ | _, 409 -> Conflict p.Detail
         | _ -> Unexpected p.Detail
 
-/// Json settings shared by server and client.  Fieldless unions (enums) are plain strings and
-/// None is null, so non F# clients see ordinary json.
+/// Json settings shared by server and client, so non F# clients see ordinary json: enums are
+/// strings (their postgres labels).  Strict in what we send, lenient in what we accept:
+/// None is always written as null, but a missing option field is read as None.
 module Json =
+    /// for writing: None as explicit null
     let options =
         JsonFSharpOptions.Default()
             .WithUnionUnwrapFieldlessTags()
             .ToJsonSerializerOptions()
+    /// for reading: an option field may be null or missing (both are None)
+    let readOptions =
+        let o = JsonSerializerOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)
+        JsonFSharpOptions.Default()
+            .WithUnionUnwrapFieldlessTags()
+            .WithSkippableOptionFields(SkippableOptionFields.FromJsonSerializerOptions)
+            .AddToJsonSerializerOptions(o)
+        o
 
 /// HttpClient helpers for the generated typed client.  Paths are relative (no leading /) so the
 /// HttpClient.BaseAddress may include a path prefix - end it with a /.
@@ -250,7 +267,7 @@ module ApiClient =
             let! body = response.Content.ReadAsStringAsync()
             let problem =
                 try
-                    match box (JsonSerializer.Deserialize<Problem>(body, Json.options)) with
+                    match box (JsonSerializer.Deserialize<Problem>(body, Json.readOptions)) with
                     | null -> None
                     | p -> Some (unbox<Problem> p)
                 with _ -> None
@@ -267,7 +284,7 @@ module ApiClient =
                 use! response = http.SendAsync request
                 if response.IsSuccessStatusCode then
                     use! stream = response.Content.ReadAsStreamAsync()
-                    let! value = JsonSerializer.DeserializeAsync<'T>(stream, Json.options)
+                    let! value = JsonSerializer.DeserializeAsync<'T>(stream, Json.readOptions)
                     return Ok value
                 else
                     let! err = errorOf response
@@ -296,7 +313,11 @@ module ApiClient =
 // Shared data structures like User definitions go here
 """
 
-let commonFileSource proj = commonTemplate.Replace("__PROJ__", titleCase proj)
+let commonFileSource proj =
+    commonTemplate
+        .Replace("__PROJ__", titleCase proj)
+        .Replace("__DEFAULT_LIMIT__", string ApiModel.defaultPageLimit)
+        .Replace("__MAX_LIMIT__", string ApiModel.maxPageLimit)
 
 /// Backend only: Giraffe handlers that run an api function and write the result (or a Problem)
 /// as json using the shared settings.
@@ -358,7 +379,7 @@ let withArg (f:'A -> ApiResult<'T>) (arg:'A) : HttpHandler =
 let withBody (f:'B -> ApiResult<'T>) : HttpHandler =
     respond (fun ctx ->
         task {
-            let! body = JsonSerializer.DeserializeAsync<'B>(ctx.Request.Body, Json.options)
+            let! body = JsonSerializer.DeserializeAsync<'B>(ctx.Request.Body, Json.readOptions)
             if isNull (box body) then
                 return Error (Validation "Request body is required")
             else

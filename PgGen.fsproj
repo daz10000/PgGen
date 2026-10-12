@@ -34,6 +34,7 @@
     <Compile Include="Reserved.fs" />
     <Compile Include="Common.fs" />
     <Compile Include="StringBuilder.fs" />
+    <Compile Include="ApiModel.fs" />
     <Compile Include="Generate.fs" />
     <Compile Include="CodeStatic.fs" />
     <Compile Include="CodeGen.fs" />

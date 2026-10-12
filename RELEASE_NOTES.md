@@ -9,6 +9,12 @@
 * Fix: nullable columns were written through sentinel values, so Some 0.0 / Some "" / Some -1 were stored as NULL; now real NULL parameters
 * Nullable Bool, Guid, Blob and array columns supported
 * Composite primary keys (pKey) emitted in SQL
+* New generated operations per table: count, keyset paging (page), a paged lookup per foreign key (list_by_<fk>) and a lookup per unique constraint (read_by_<cols>)
+* index DSL item; foreign key columns are indexed automatically
+* Enum values on the wire are the postgres labels (e.g. "in_progress"), not F# case names
+* JSON input: optional fields may be omitted or null
+* Fix: nullable enum columns did not compile in update / read types
+* Generated domain types, api contract, client and routes all come from one model (ApiModel.fs)
 * Fix: RLS tenant settings were transaction local, so tenants could not see or insert their own rows
 * Fix: storage used blocking type provider calls
 * Fix: Guid columns without timestamps, F# keyword enum values, nullable decimal / bigint columns

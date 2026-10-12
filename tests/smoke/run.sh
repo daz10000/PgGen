@@ -22,4 +22,8 @@ dotnet fsi "$here/spec.fsx" "$work"
 dotnet build "$work/out/Api/SmokeApi.fsproj" -v quiet   # shared project: no database needed
 cp -r "$here/rt" "$work/rt"
 dotnet build "$work/rt/rt.fsproj" -v quiet              # backend: type-checked against pggen_smoke
-dotnet run --no-build --project "$work/rt/rt.fsproj" 2>&1 | grep -E "^(PASS|FAIL|[0-9]+ failures)"
+if [[ -n "${SMOKE_VERBOSE:-}" ]]; then   # SMOKE_VERBOSE=1 shows server logs / exceptions
+    dotnet run --no-build --project "$work/rt/rt.fsproj"
+else
+    dotnet run --no-build --project "$work/rt/rt.fsproj" 2>&1 | grep -E "^(PASS|FAIL|[0-9]+ failures)"
+fi

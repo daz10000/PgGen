@@ -63,14 +63,14 @@ task {
     check "Some -1 is not stored as NULL" (match o3 with Ok (Some o) -> o.IdTaxon = Some -1 && o.GenomeSize = Some -1L | _ -> false) o3
     let! raw = http.GetStringAsync($"api/lab/sample/read/{sid}")
     printfn "  wire format: %s" raw
-    check "enum on the wire is a plain string" (raw.Contains "\"Status\":\"InProgress\"") raw
+    check "enum on the wire is the postgres label" (raw.Contains "\"Status\":\"in_progress\"") raw
 
     let! badFk = client.Lab.CreateSample { Label = "s2"; Notes = None; Weight = None; Data = "{}"; Created = DateTime.UtcNow; IdOrganism = 424242; Status = Status.NewX }
     check "FK violation -> Conflict" (match badFk with Error (Conflict _) -> true | _ -> false) badFk
 
-    let! t1 = client.Lab.CreateSampleTag { Tag = "red"; IdSample = sid }
+    let! t1 = client.Lab.CreateSampleTag { Tag = "red"; IdSample = sid; TagStatus = None }
     check "create composite key row" (t1 = Ok ()) t1
-    let! t2 = client.Lab.CreateSampleTag { Tag = "red"; IdSample = sid }
+    let! t2 = client.Lab.CreateSampleTag { Tag = "red"; IdSample = sid; TagStatus = Some Status.DoneX }
     check "duplicate composite key -> Conflict" (match t2 with Error (Conflict _) -> true | _ -> false) t2
     let! tr = client.Lab.ReadSampleTag { IdSample = sid; Tag = "red" }
     check "composite key read (POST)" (match tr with Ok (Some x) -> x.Tag = "red" | _ -> false) tr
@@ -79,6 +79,59 @@ task {
     check "list with paging" (match page with Ok xs -> xs.Length = 1 | _ -> false) page
     let! all = client.Lab.ListSample()
     check "list without paging" (match all with Ok xs -> xs.Length >= 1 | _ -> false) all
+
+    // ---- layer 1 queries: count, keyset paging, fk and unique lookups
+    for i in 1 .. 5 do
+        let! _ = client.Lab.CreateOrganism { Name = $"bulk{i}"; IdTaxon = None; Taxonomy = [||]; GenomeSize = None; IsReference = None; ExternalId = None; Aliases = None; Photo = None }
+        ()
+    let! total = client.Lab.CountOrganism()
+    check "count" (match total with Ok n -> n >= 7L | _ -> false) total
+    let total = match total with Ok n -> int n | _ -> 0
+    let walk () =
+        task {
+            let mutable after = None
+            let mutable ids = []
+            let mutable pages = 0
+            let mutable fin = false
+            while not fin do
+                match! client.Lab.PageOrganism { After = after; Limit = Some 2 } with
+                | Ok p ->
+                    pages <- pages + 1
+                    ids <- ids @ (p.Items |> Array.toList |> List.map (fun o -> o.Id))
+                    match p.Next with
+                    | Some n -> after <- Some n
+                    | None -> fin <- true
+                | Error e -> failwithf "page failed %A" e
+            return ids, pages
+        }
+    let! ids, pages = walk ()
+    check "keyset paging visits every row once, in order" (ids.Length = total && ids = List.sort ids && List.distinct ids = ids && pages >= total / 2) (ids, pages, total)
+
+    let! byOrg = client.Lab.ListSampleByIdOrganism { IdOrganism = orgId; After = None; Limit = None }
+    check "list_by_id_organism" (match byOrg with Ok p -> p.Items.Length = 2 && p.Items |> Array.forall (fun x -> x.IdOrganism = orgId) && p.Next = None | _ -> false) byOrg
+    let! byLabel = client.Lab.ReadSampleByLabel { Label = "s1" }
+    check "read_by_label" (match byLabel with Ok (Some x) -> x.Id = sid | _ -> false) byLabel
+    let! byLabelMissing = client.Lab.ReadSampleByLabel { Label = "nope" }
+    check "read_by_label missing -> None" (byLabelMissing = Ok None) byLabelMissing
+    let! dupLabel = client.Lab.CreateSample { Label = "s1"; Notes = None; Weight = None; Data = "{}"; Created = DateTime.UtcNow; IdOrganism = orgId; Status = Status.NewX }
+    check "duplicate unique label -> Conflict" (match dupLabel with Error (Conflict _) -> true | _ -> false) dupLabel
+
+    let! _ = client.Lab.CreateSampleTag { Tag = "blue"; IdSample = sid; TagStatus = None }
+    let! _ = client.Lab.CreateSampleTag { Tag = "green"; IdSample = sid; TagStatus = Some Status.InProgress }
+    let! tp1 = client.Lab.PageSampleTag { After = None; Limit = Some 2 }
+    let next = match tp1 with Ok p -> p.Next | _ -> None
+    let! tp2 = client.Lab.PageSampleTag { After = next; Limit = Some 2 }
+    check "composite key keyset paging" (match tp1, tp2 with
+                                          | Ok p1, Ok p2 -> (Array.append p1.Items p2.Items |> Array.map (fun x -> x.Tag)) = [| "blue"; "green"; "red" |]
+                                          | _ -> false) (tp1, tp2)
+    let! green = client.Lab.ReadSampleTag { IdSample = sid; Tag = "green" }
+    check "nullable enum round trip" (match green with Ok (Some x) -> x.TagStatus = Some Status.InProgress | _ -> false) green
+    let! _ = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "blue" }
+    let! _ = client.Lab.DeleteSampleTag { IdSample = sid; Tag = "green" }
+
+    let! rawPage = http.PostAsync("api/lab/organism/page", new StringContent("{}", Text.Encoding.UTF8, "application/json"))
+    let! rawPageBody = rawPage.Content.ReadAsStringAsync()
+    check "non F# client: empty json body uses defaults" (int rawPage.StatusCode = 200 && rawPageBody.Contains "\"Items\"") rawPageBody
 
     let! delParent = client.Lab.DeleteOrganism orgId
     check "delete row still referenced -> Conflict" (match delParent with Error (Conflict _) -> true | _ -> false) delParent

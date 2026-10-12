@@ -38,6 +38,10 @@ let table (name:string) (tableAttr:TableAttr list) (body:TableBodyItem list) =
                             c
                         | _ -> ()
             ]
+            Indexes = [ for b in body do
+                        match b with
+                        | IndexItem i -> i
+                        | _ -> () ]
             Uniques = [ for b in body do
                         match b with
                         | Unique u -> u
@@ -100,6 +104,10 @@ let db (name:string) (dbAttr:DBAttr list) (body:DBBodyItem list) =
             | _ -> defaultOwner
         Comment = comment
     }
+
+/// Secondary index on the given columns (foreign key columns are indexed automatically)
+let index (cols:string list) =
+    IndexItem { Cols = cols }
 
 let unique (cols:string list) =
     Unique {

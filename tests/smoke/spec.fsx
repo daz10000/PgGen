@@ -1,5 +1,6 @@
 // Smoke test spec: covers enums with F# keyword values, FKs, Guid without Timestamp, nullable
-// Int32/Id64/Decimal/String, arrays, jsonb, RLS and a composite key.  Run via run.sh.
+// Int32/Id64/Decimal/String/Bool/Guid/Blob/enum, arrays, jsonb, RLS, a composite key, unique and
+// explicit indexes.  Run via run.sh.
 // usage: dotnet fsi spec.fsx <output folder>
 #r "../../bin/Debug/net10.0/PgGen.dll"
 open PgGen
@@ -29,6 +30,8 @@ let smoke =
                 col "created" Timestamp []
                 frefId "organism" []
                 enum "status" []
+                unique [ "label" ]                            // -> read_by_label
+                index [ "created" ]
             ]
             table "invoice" [ rlsTenant "tenant_id" ] [   // Guid but no Timestamp -> needs open System
                 col "id" Id []
@@ -38,6 +41,7 @@ let smoke =
             table "sample_tag" [] [
                 col "tag" String []
                 frefId "sample" []
+                enum "status" [ EName "tag_status"; ENullable ]   // nullable enum
                 pKey [ "id_sample"; "tag" ]
             ]
         ]
