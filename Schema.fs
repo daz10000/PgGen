@@ -159,7 +159,9 @@ let extractSchemaAndEnums (schemaExclude: Set<string>) (connectionString: string
 
 /// Generates a schema definition (as F# code or other format) from the extracted schema and enums.
 let generateSchema (schema: ExtractedSchema) (projectName:string) =
-    let header = """#r "bin/Debug/net9.0/PgGen.dll"
+    let header = $"""#r "nuget: FSharp.PgGen, {Common.pgGenVersion}"
+// or, when working against a local checkout of PgGen:
+// #r "<path to PgGen>/bin/Debug/net10.0/PgGen.dll"
 open PgGen
 open PgGen.Build
 
@@ -194,29 +196,7 @@ open PgGen.Build
                             let fkOpt = schema.ForeignKeys |> List.tryFind (fun fk ->
                                 fk.Schema = c.Schema && fk.Table = c.Table && fk.Column = c.Column
                             )
-                            let mapType2 (c: ColumnInfo) =
-                                match c.UDTName with
-                                | "timestamptz" -> "Timestamp"
-                                | "timestamp with time zone" -> "Timestamp"
-                                | "int8" -> "Int32"
-                                | "float4" -> "Float"
-                                | "timestamp" -> "Timestamp"
-                                | "numeric" -> "Decimal"
-                                | "decimal" -> "Decimal"
-                                | "bool" -> "Bool"
-                                | "int4" -> "Int32"
-                                | "varchar" -> "String"
-                                | "float8" -> "Float"
-                                | "_float8" -> "Float"
-                                | "json" -> "Jsonb"
-                                | "text" -> "String"
-                                | x when c.DataType = "USER-DEFINED" -> 
-                                    // Enum type
-                                    x
-                                | _ -> 
-                                    failwithf "Unknown type %s for column %s, table %s, schema %s udtOpt=%A" c.DataType c.Column c.Table c.Schema udtNameOpt
-
-                            // TODO: replace function below with one above
+                            // TODO: merge mapType2 into mapType
                             // handle ARRAY column
                             // integratie array, enum and regular responses
 
@@ -236,8 +216,29 @@ open PgGen.Build
                                 | "uuid" -> "Guid"
                                 | "bytea" -> "Blob"
                                 | "decimal" | "numeric" -> "Decimal"
-                                | _ as x -> 
+                                | _ as x ->
                                     failwithf $"Unknown type {x} for column {c}, table {c.Table}, schema {c.Schema} udtOpt={udtNameOpt}"
+                            let mapType2 (c: ColumnInfo) =
+                                match c.UDTName with
+                                | "timestamptz" -> "Timestamp"
+                                | "timestamp with time zone" -> "Timestamp"
+                                | "float4" -> "Float"
+                                | "timestamp" -> "Timestamp"
+                                | "numeric" -> "Decimal"
+                                | "decimal" -> "Decimal"
+                                | "bool" -> "Bool"
+                                | "int4" -> "Int32"
+                                | "varchar" -> "String"
+                                | "float8" -> "Float"
+                                | "_float8" -> "Float"
+                                | "json" -> "Jsonb"
+                                | "text" -> "String"
+                                | x when c.DataType = "USER-DEFINED" ->
+                                    // Enum type
+                                    x
+                                | x ->
+                                    // uuid, jsonb, bytea etc.  Array udt names are the element type prefixed with _
+                                    mapType (x.TrimStart('_'))
                             let colLine =
                                 match fkOpt with
                                 | Some fk ->

@@ -51,6 +51,35 @@ and EnumRefAttr =
     /// Mark the enum column as nullable
     | ENullable
 
+/// Filter in a named query.  Every filter is optional at run time (None = not applied)
+and QueryFilter =
+    /// column = value
+    | Eq of string
+    /// column is one of the given values
+    | AnyOf of string
+    /// From <= column < To
+    | Range of string
+    /// text column starts with the value
+    | Prefix of string
+    /// text column contains the value, case insensitive
+    | Contains of string
+
+and SortOrder =
+    | Asc of string
+    | Desc of string
+
+/// A named query: generated as one type checked SQL statement plus api / client / OpenAPI
+and NamedQuery = {
+    QName : string
+    Filters : QueryFilter list
+    OrderBy : SortOrder list
+}
+
+/// Secondary index (CREATE INDEX)
+and TableIndex = {
+    Cols : string list
+}
+
 and PKey = {
     Cols : string list
 }
@@ -63,6 +92,8 @@ and Table = {
         FRefs : ForeignRef list
         ERefs : EnumRef list
         Uniques : Unique list
+        Indexes : TableIndex list
+        Queries : NamedQuery list
         PKey : PKey option
 } with
     member x.FSharpName() =
@@ -180,6 +211,13 @@ type TableBodyItem =
     | ForeignRef of ForeignRef
     | EnumRef of EnumRef
     | PKey of PKey
+    | IndexItem of TableIndex
+    | QueryItem of NamedQuery
+
+/// Parts of a named query definition
+type QueryPart =
+    | Filter of QueryFilter list
+    | OrderBy of SortOrder list
 
 
 

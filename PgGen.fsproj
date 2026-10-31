@@ -4,23 +4,51 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AssemblyName>PgGen</AssemblyName>
     <RootNamespace>PgGen</RootNamespace>
+    <!-- Library packages should pin a low FSharp.Core instead of inheriting the SDK's version -->
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
   </PropertyGroup>
+
+  <!-- NuGet package metadata -->
+  <PropertyGroup>
+    <!-- NB: the id "PgGen" on nuget.org is owned by an unrelated project (all versions unlisted, so it
+         does not show up in search, but it cannot be reused), hence FSharp.PgGen -->
+    <PackageId>FSharp.PgGen</PackageId>
+    <!-- Version and PackageReleaseNotes come from RELEASE_NOTES.md (see Directory.Build.props) -->
+    <Authors>Darren Platt</Authors>
+    <Description>F# DSL for describing a Postgres database. Generates SQL DDL (tables, enums, foreign keys, row level security) and an F# backend (typed storage layer, service layer, web api and client), and can reverse engineer an existing database into the DSL.</Description>
+    <PackageTags>fsharp;postgres;postgresql;codegen;schema;ddl;sql;giraffe</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/daz10000/PgGen</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/daz10000/PgGen</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Include="Types.fs" />
     <Compile Include="Reserved.fs" />
     <Compile Include="Common.fs" />
     <Compile Include="StringBuilder.fs" />
+    <Compile Include="ApiModel.fs" />
+    <Compile Include="OpenApi.fs" />
     <Compile Include="Generate.fs" />
     <Compile Include="CodeStatic.fs" />
     <Compile Include="CodeGen.fs" />
-    <Compile Include="Build.fs" /><Compile Include="Schema.fs" />
-    
+    <Compile Include="Build.fs" />
+    <Compile Include="Schema.fs" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="protein_demo.fsx" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="protein_demo.fsx" Pack="false" />
+    <None Include="schema2fs.fsx" Pack="false" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Argu" Version="6.2.0" />
-    <PackageReference Include="Npgsql" Version="9.0.3" />
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="Npgsql" />
   </ItemGroup>
 </Project>

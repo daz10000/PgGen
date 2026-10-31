@@ -42,6 +42,25 @@ let private emitRls owner schema (table:Table) =
             yield "\n"
         }
 
+/// Explicit indexes, plus one per generated foreign key column (postgres doesn't index FKs, and
+/// the generated list_by_<fk> lookups need it) unless an index / unique / primary key already
+/// starts with that column
+let indexedColumns (table:Table) =
+    let leading =
+        [ for i in table.Indexes -> i.Cols
+          for u in table.Uniques -> u.Cols
+          match table.PKey with
+          | Some pk -> yield pk.Cols
+          | None -> () ]
+        |> List.choose List.tryHead
+        |> Set.ofList
+    let fkCols =
+        [ for fr in table.FRefs do
+            if fr.Generate then
+                let col = fr.Name |> Option.defaultValue $"id_{fr.ToTable}"
+                if not (leading.Contains col) then yield [ col ] ]
+    [ for i in table.Indexes -> i.Cols ] @ fkCols
+
 let emitTable owner schema (table:Table) =
     stringBuffer {
         let hasId = table.Cols |> List.exists (fun c -> c.CType = Id)
@@ -81,6 +100,13 @@ let emitTable owner schema (table:Table) =
                     let name = $"uq_{table.TName}_{colsConcat}"
                     yield $"    CONSTRAINT {name} UNIQUE({colsConcatComma})"
 
+                // Composite / non Id primary key
+                match table.PKey with
+                | Some pk ->
+                    let colsConcatComma = String.Join(",",pk.Cols)
+                    yield $"    CONSTRAINT pk_{table.TName} PRIMARY KEY({colsConcatComma})"
+                | None -> ()
+
                 // Foreign reference constraints
                 for fr in table.FRefs do
                     let frCols = String.Join("_",fr.FromCols)
@@ -104,6 +130,11 @@ let emitTable owner schema (table:Table) =
             | None -> ()
         yield $"ALTER TABLE {schema}.{table.TName} OWNER TO {owner};\n"
         yield "\n"
+        for cols in indexedColumns table do
+            let colsConcat = String.Join("_",cols)
+            let colsConcatComma = String.Join(",",cols)
+            yield $"CREATE INDEX ix_{table.TName}_{colsConcat} ON {schema}.{table.TName} ({colsConcatComma});\n"
+        if not (indexedColumns table).IsEmpty then yield "\n"
         yield emitRls owner schema table
     }
 
@@ -143,6 +174,10 @@ let emitDatabase (d:Db) =
     let errs = [|
         for schema in d.Schemas do
             for t in schema.Tables do
+                for problem in ApiModel.validateQueries t do
+                    yield $"ERROR: {problem}"
+                if t.PKey.IsSome && t.Cols |> List.exists (fun c -> c.CType = Id) then
+                    yield $"ERROR: table {schema.SName}.{t.TName} has both an Id column and a pKey - only one primary key is allowed"
                 for c in t.Cols do
                     if Reserved.isReserved c.CName then
                         yield $"ERROR: {c.CName} is a reserved keyword in postgres"
@@ -160,9 +195,8 @@ let emitDatabase (d:Db) =
                             yield $"ERROR: {en} used for enum column reference name is a reserved keyword in postgres"
     |]
     if errs.Length > 0 then
-        for e in errs do
-            printfn $"{e}"
-        exit 1
+        // raise rather than exit so library consumers (servers, test runners) can handle it
+        failwith (String.Join("\n", errs))
 
     stringBuffer {
         yield "-- ==================================================\n"

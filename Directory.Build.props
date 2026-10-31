@@ -1,0 +1,21 @@
+<Project>
+  <!--
+    Version and package release notes come from RELEASE_NOTES.md (FAKE style):
+
+      ### 0.2.0 - 2026-11-01
+      * what changed
+
+    The first "### x.y.z" heading is the version being built; its bullets become
+    PackageReleaseNotes.  Override from the command line with -p:Version=... if needed.
+  -->
+  <PropertyGroup>
+    <ReleaseNotesFile>$(MSBuildThisFileDirectory)RELEASE_NOTES.md</ReleaseNotesFile>
+    <_ReleaseNotesText Condition="Exists('$(ReleaseNotesFile)')">$([System.IO.File]::ReadAllText('$(ReleaseNotesFile)'))</_ReleaseNotesText>
+    <Version Condition="'$(Version)' == '' and '$(_ReleaseNotesText)' != ''">$([System.Text.RegularExpressions.Regex]::Match($(_ReleaseNotesText), '(?m)(?&lt;=^###\s+)\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?'))</Version>
+    <PackageReleaseNotes Condition="'$(_ReleaseNotesText)' != ''">$([System.Text.RegularExpressions.Regex]::Match($(_ReleaseNotesText), '(?ms)(?&lt;=^###[^\r\n]*\r?\n).*?(?=^###|\z)').Value.Trim())</PackageReleaseNotes>
+  </PropertyGroup>
+
+  <Target Name="CheckReleaseNotesVersion" BeforeTargets="Build;Pack" Condition="'$(MSBuildProjectName)' == 'PgGen'">
+    <Error Condition="'$(Version)' == ''" Text="Could not read a version from $(ReleaseNotesFile). The first heading must look like: ### 1.2.3 - date" />
+  </Target>
+</Project>

@@ -8,6 +8,7 @@ open PgGen.StringBuffer
 open Common
 open System
 open PgGen.CodeStatic
+open PgGen.ApiModel
 
 
 let createModuleName suffix (project:string) (domain:string) =
@@ -28,181 +29,96 @@ let postgrestify (s:string) =
     else
         pre.ToLowerInvariant()
 
-/// generates a file SchemaDomain.fs that contains type definitions for each table in the
-/// for each of the CRUD operations
+let private docComment (indent:string) (doc:string option) =
+    match doc with
+    | Some d -> $"{indent}/// {d.Replace('\r', ' ').Replace('\n', ' ')}\n"
+    | None -> ""
+
+let emitRecord (r:RecordDef) =
+    stringBuffer {
+        yield docComment "" r.Doc
+        yield $"type {r.Name} = {{\n"
+        for f in r.Fields do
+            yield docComment "    " f.Doc
+            yield $"    {f.Name} : {f.Type.FSharp()}\n"
+        yield $"}}\n"
+    }
+
+let emitEnum (e:EnumDef) =
+    stringBuffer {
+        yield docComment "" e.Doc
+        yield $"type {e.Name} =\n"
+        for case, wire in e.Cases do
+            // on the wire the value is the postgres enum label, not the F# case name
+            yield $"    | [<JsonName \"{wire}\">] {case}\n"
+    }
+
+/// postgres type to cast a parameter to when its type can't be inferred (e.g. "@p IS NULL")
+let private sqlParamType (schema:string) (c:Column) =
+    if c.Array then failwithf $"Array column {c.CName} can't be used as a key"
+    match c.CType with
+    | Id | Int32 -> "int"
+    | Id64 -> "bigint"
+    | String -> "text"
+    | Jsonb -> "jsonb"
+    | Bool -> "boolean"
+    | Float -> "float8"
+    | Decimal -> "numeric"
+    | Timestamp -> "timestamptz"
+    | ColumnType.Guid -> "uuid"
+    | Blob -> "bytea"
+    | Enum e -> $"{schema}.{e}"
+
+/// F# lambda turning a type provider row into the table's record
+let private rowToRecord (t:Table) =
+    let fields =
+        [ for col in t.FullCols() ->
+            let value =
+                match col.CType, col.Nullable with
+                | Enum e, false -> $"r.{col.CName} |> {e |> toFSharpLower}FromEnum"
+                | Enum e, true -> $"r.{col.CName} |> Option.map {e |> toFSharpLower}FromEnum"
+                | _ -> $"r.{col.CName}"
+            $"{col.FSharpName()} = {value}" ]
+    let fieldsText = String.Join("; ", fields)
+    $"(fun r -> ({{ {fieldsText} }} : {t.FSharpName()}))"
+
+/// generates, for one schema: the domain types (shared), storage, service, api contract + client
+/// (shared), server routes and the wiring of the api to the service layer
 let emitDomain (proj:string) (s:Schema) =
     let domain = titleCase s.SName
     let projCap = proj |> titleCase
-
+    let operations = schemaOperations s
 
     let domainCode =
         stringBuffer {
             yield $"namespace {projCap}.Domain.{domain}\n"
-
-            let needsSystem =
-                [for t in s.Tables do
-                    for c in t.Cols do
-                        if c.CType = Timestamp then
-                            yield true] |> Seq.isEmpty |> not
-
-            if needsSystem then
-                yield $"open System\n"
+            yield $"\n"
+            yield $"open System\n"
+            yield $"open System.Text.Json.Serialization\n"
 
             // Any enums in the schema that need F# types
             for e in s.Enums do
                 yield $"\n"
-                yield $"type {e.EName |> toFSharp} =\n"
-                for v in e.EValues do
-                    yield $"    | {v |> toFSharp}\n"
+                yield emitEnum (enumDef e)
             yield $"\n"
 
             for t in s.Tables do
-                let fsharpName = t.FSharpName()
-                let colsExceptKey = t.Cols |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
-
-                let availCols = [   for c in t.Cols do
-                                        yield {| Name = c.CName;Type = c.CType.FSharpType(); IsArray = c.Array |}
-                                    for fr in t.FRefs do
-                                        if fr.Generate then
-                                            let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}"
-                                            yield {| Name = colName;Type = "int" ; IsArray = false |}
-                                        else
-                                            failwithf "not implemented - not integer foreign key references"
-                                    ]
-
-                yield $" // -------------------------------------------\n"
-                yield $" // {t.TName}\n"
-                yield $" // -------------------------------------------\n"
-                // CREATE type
-                yield $"type Create{fsharpName} = {{\n"
-                for col in colsExceptKey do
-                    let optionModifier =
-                        if col.Nullable then
-                            " option"
-                        else
-                            ""
-                    let arrayModifier = if col.Array then " []" else ""
-                    match col.Comment with
-                    | None -> ()
-                    | Some c ->
-                        yield $"\n    /// {c}\n"
-                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
-                for fr in t.FRefs do
-                    if fr.Generate then
-                        let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
-                        let optionModifier =
-                            if fr.IsNullable then
-                                " option"
-                            else
-                                ""
-                        yield $"    {colName} : int{optionModifier}\n"
-                    else
-                        failwithf "Not implemented - not integer foreign key references"
-
-                // columns with enum type
-                for e in t.ERefs do
-                    if e.Generate then
-                        let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
-                        let optionModifier =
-                            if e.IsNullable then
-                                " option"
-                            else
-                                ""
-                        yield $"    {colName} : {e.EName |> toFSharp}{optionModifier}\n"
-                    else
-                        failwithf "Not implemented - nongenerated enum references"
-                yield $"}}"
-                yield "\n"
-
-                // UPDATE type
-                yield $"type Update{fsharpName} = {{\n"
-                for col in t.Cols do // include key since we need to know what to update
-                    let optionModifier =
-                        if col.Nullable then
-                            " option"
-                        else
-                            ""
-                    let arrayModifier = if col.Array then " []" else ""
-                    match col.Comment with
-                    | None -> ()
-                    | Some c ->
-                        yield $"\n    /// {c}\n"
-                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
-                for fr in t.FRefs do
-                    if fr.Generate then
-                        let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
-                        let optionModifier =
-                            if fr.IsNullable then
-                                " option"
-                            else
-                                ""
-                        yield $"    {colName} : int{optionModifier}\n"
-                for e in t.ERefs do
-                    if e.Generate then
-                        let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
-                        yield $"    {colName} : {e.EName |> toFSharp}\n"
-                    else
-                        failwithf "Not implemented - nongenerated enum references"
-                yield $"}}"
-                yield "\n"
-
-                // Basic full field type
-                yield $"type {fsharpName} = {{\n"
-                for col in t.Cols do
-                    let optionModifier =
-                        if col.Nullable then
-                            " option"
-                        else
-                            ""
-                    let arrayModifier = if col.Array then " []" else ""
-                    match col.Comment with
-                    | None -> ()
-                    | Some c ->
-                        yield $"\n    /// {c}\n"
-                    yield $"    {col.FSharpName()} : {col.CType.FSharpType()}{arrayModifier}{optionModifier}\n"
-                for fr in t.FRefs do
-                    if fr.Generate then
-                        let colName = fr.Name |> Option.defaultValue $"id_{fr.ToTable}" |> toFSharp
-                        let optionModifier =
-                            if fr.IsNullable then
-                                " option"
-                            else
-                                ""
-                        yield $"    {colName} : int{optionModifier}\n"
-                for e in t.ERefs do
-                    if e.Generate then
-                        let colName = e.Name |> Option.defaultValue e.EName |> toFSharp
-                        yield $"    {colName} : {e.EName |> toFSharp}\n"
-                    else
-                        failwithf "Not implemented - nongenerated enum references"
-                yield $"}}"
-
-                // Tables that aren't using a simple integer key need a custom primary key type
-                match t.PKey with
-                | Some pk ->
-                    yield $"\n"
-                    yield $"type {t.PKeyTypeName()}= {{\n"
-                    for colName in pk.Cols do
-                        let c =
-                            match availCols|> List.tryFind (fun c -> c.Name = colName) with
-                            | Some x -> x
-                            | None ->
-                                failwithf $"Could not find column primary key referenced '{colName}' in table '{t.TName}' cols {availCols}"
-
-                        let optionalArray = if c.IsArray then " []" else ""
-                        yield $"    {c.Name |> toFSharp} : {c.Type}{optionalArray}\n"
-                    yield $"}}"
-                | None -> ()
-                yield "\n"
-
+                yield $"// -------------------------------------------\n"
+                yield $"// {t.TName}\n"
+                yield $"// -------------------------------------------\n"
+                for r in tableRecords t do
+                    yield emitRecord r
+                    yield "\n"
         }
+
     let storageCode =
         stringBuffer {
             yield $"module {projCap}.Domain.{domain}.Storage\n"
             yield $"\n"
+            yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Db\n"
             yield $"open {projCap}.Domain.{domain}\n"
-            yield $"open Plough.ControlFlow\n"
+            yield $"open System.Threading.Tasks\n"
 
             // Any enums in the schema that need converter functions to/from F# types
             for e in s.Enums do
@@ -212,65 +128,34 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"let {fSharpVar}ToEnum(v:{fSharpType}) =\n"
                 yield $"    match v with\n"
                 for v in e.EValues do
-                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{v}\n"
+                    yield $"    | {fSharpType}.{v |> toFSharp} -> Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{Reserved.quoteFSharpReserved v}\n"
                 yield $"\n"
                 yield $"let {fSharpVar}FromEnum(e:Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}) =\n"
                 yield $"    match e with\n"
                 for v in e.EValues do
-                    yield $"    | Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{v} -> {fSharpType}.{v |> toFSharp}\n"
+                    yield $"    | Db.{Reserved.quoteFSharpReserved s.SName}.Types.{e.EName}.{Reserved.quoteFSharpReserved v} -> {fSharpType}.{v |> toFSharp}\n"
                 yield $"    | x -> failwithf $\"Impossible {e.EName} enum value {{x}}\"\n"
                 yield $"\n"
 
             for t in s.Tables do
                 let colsExceptKey = t.FullCols() |> List.filter (fun c -> c.CType <> Id) // FIXFIX - generalize to non int keys
                 let colNamesExceptKey = String.Join(",",[for c in colsExceptKey  -> postgrestify c.CName])
-                let placeHolderDefs =
-                    [for c in colsExceptKey  ->
-                                            if c.Nullable then
-                                                let defaultVPostgres =
-                                                    match c.CType with
-                                                    | Int32 -> "-1"
-                                                    | String -> "''"
-                                                    | Timestamp -> "'0001-01-01'::timestamptz"
-                                                    | Jsonb -> "'{}'::jsonb"
-                                                    | Float -> "0.0"
-                                                    | Enum x -> $"NULL::{x}"
-                                                    | Decimal -> "0.0M"
-                                                    | _ -> failwithf $"Not implemented - default value for {c.CType}"
-                                                {| CName = c.CName ; CValue = $"(CASE WHEN @{c.CName} = {defaultVPostgres} THEN NULL ELSE @{c.CName} END)" |}
-                                            else
-                                                {| CName = c.CName ; CValue = $"@{c.CName}" |}
-                                    ]
-                let insertPlaceHolders = String.Join(",",[for c in placeHolderDefs  -> c.CValue])
-                let updatePlaceHolders = String.Join(",",[for c in placeHolderDefs  -> $"{c.CName}={c.CValue}"])
+                // Create / update commands use AllParametersOptional=true: every parameter is an option
+                // and None is sent as SQL NULL, so nullable columns need no special handling.
+                let insertPlaceHolders = String.Join(",",[for c in colsExceptKey -> $"@{c.CName}"])
+                let updatePlaceHolders = String.Join(",",[for c in colsExceptKey -> $"{postgrestify c.CName}=@{c.CName}"])
                 let fullPostgresCols =
                     String.Join(",",[for c in t.FullCols()  -> postgrestify c.CName])
                 let nonPKParametersForCall =
                     String.Join(",",[for c in colsExceptKey  ->
-                                        let optionalNullHack =
-                                            if c.Nullable then
-                                                if c.Array then
-                                                    failwith $"Not implemented - nullable array columns"
-                                                let defaultV =
-                                                    match c.CType with
-                                                    | Int32 -> "-1"
-                                                    | String -> "\"\""
-                                                    | Timestamp -> "\"0001-01-01\""
-                                                    | Jsonb -> "\"{}\""
-                                                    | Float -> "0.0"
-                                                    | Enum x -> "NULL"
-                                                    | Decimal -> "0.0M"
-                                                    | _ -> failwithf $"Not implemented - default value for {c.CType}"
-                                                $"(request.{c.FSharpName()} |> Option.defaultValue {defaultV})"
-                                            else
-                                                $"request.{c.FSharpName()}"
-                                        let optionalEnumConversion =
-                                            match c.CType with
-                                            | Enum e ->
-                                                let fSharpVar = e |> toFSharpLower
-                                                $"({optionalNullHack}|> {fSharpVar}ToEnum)"
-                                            | _ -> $"{optionalNullHack}"
-                                        $"{postgrestify c.CName}={optionalEnumConversion}"])
+                                        let field = $"request.{c.FSharpName()}"
+                                        let value =
+                                            match c.CType, c.Nullable with
+                                            | Enum e, true -> $"({field} |> Option.map {e |> toFSharpLower}ToEnum)"
+                                            | Enum e, false -> $"Some ({field} |> {e |> toFSharpLower}ToEnum)"
+                                            | _, true -> field
+                                            | _, false -> $"Some {field}"
+                                        $"{postgrestify c.CName}={value}"])
 
                 let fsharpName = t.FSharpName()
                 let returning,readWhereClause,parameters =
@@ -293,8 +178,8 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        do! TenantRls.applyAmbientToConnection conn\n"
                 yield $"        use cmd = Db.CreateCommand<\"\"\"INSERT INTO {s.SName}.{t.TName} (\n"
                 yield $"            {colNamesExceptKey}) \n                    VALUES({insertPlaceHolders}) {returning}\n"
-                yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let newId = cmd.Execute({nonPKParametersForCall})\n"
+                yield $"                                   \"\"\",SingleRow=true,AllParametersOptional=true>(conn)\n"
+                yield $"        let! newId = cmd.TaskAsyncExecute({nonPKParametersForCall})\n"
                 match t.PKey with
                 | None ->
                     yield $"        return newId.Value // returns option but should be reliable\n"
@@ -309,16 +194,8 @@ let emitDomain (proj:string) (s:Schema) =
                 yield $"        use cmd = Db.CreateCommand<\"\"\""
                 yield $"        SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} WHERE {readWhereClause}\n"
                 yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let result = cmd.Execute({parameters})\n"
-                yield $"        return result |> Option.map(fun r->\n"
-                yield $"                                    {{\n"
-                for col in t.FullCols() do
-                    let optionalEnumMap =
-                        match col.CType with
-                        | Enum e -> $" |> {e |> toFSharpLower}FromEnum"
-                        | _ -> ""
-                    yield $"                                        {col.FSharpName()} = r.{col.CName}{optionalEnumMap}\n"
-                yield $"                                    }})\n"
+                yield $"        let! result = cmd.TaskAsyncExecute({parameters})\n"
+                yield $"        return result |> Option.map {rowToRecord t}\n"
                 yield $"    }}\n"
                 yield $"\n"
 
@@ -339,45 +216,37 @@ let emitDomain (proj:string) (s:Schema) =
                         [   yield nonPKParametersForCall // already have these from insert
                             match t.PKey with // updates also need the primary key columns
                             | None ->
-                                yield $"id=request.Id"
-                            | Some cols ->
-                                // already covered I think by the nonPKParametersForCall
-                                //for col in cols.Cols do
-                                //    yield $"{col}=request.{col}"
-                                ()
+                                yield $"id=Some request.Id"
+                            | Some _ ->
+                                () // key columns are already in nonPKParametersForCall
                         ])
 
                 yield $"                {updatePlaceHolders}\n"
                 yield $"          WHERE {readWhereClause}\n"
-                yield $"                                   \"\"\",SingleRow=true>(conn)\n"
-                yield $"        let result = cmd.Execute({updateParameters})\n"
-                yield $"        return ()\n"
+                yield $"                                   \"\"\",AllParametersOptional=true>(conn)\n"
+                yield $"        // rows affected: 0 when the row doesn't exist (or RLS hides it)\n"
+                yield $"        return! cmd.TaskAsyncExecute({updateParameters})\n"
                 yield $"    }}\n"
                 yield $"\n"
                 // ====================================================
                 // Delete code
                 // ====================================================
-                yield $"let delete{fsharpName} (id:{t.PKeyTypeName()}) =\n"
+                yield $"let delete{fsharpName} (request:{t.PKeyTypeName()}) : Task<int> =\n"
                 yield $"    task {{\n"
-                yield $"        failwithf \"Not implemented\"\n"
-                yield $"        return \"unimplemented\"\n"
+                yield $"        use! conn = Db.openConnectionAsync()\n"
+                yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                yield $"        use cmd = Db.CreateCommand<\"\"\"DELETE FROM {s.SName}.{t.TName} WHERE {readWhereClause}\"\"\">(conn)\n"
+                yield $"        // rows affected: 0 when the row doesn't exist (or RLS hides it)\n"
+                yield $"        return! cmd.TaskAsyncExecute({parameters})\n"
                 yield $"    }}"
                 yield $"\n\n"
 
                 // ====================================================
-                // List code
+                // List code (offset paging)
                 // ====================================================
                 let emitRunPart() =
                     stringBuffer {
-                        yield $"            return result |> Seq.map(fun r->\n"
-                        yield $"                                    {{\n"
-                        for col in t.FullCols() do
-                            let optionalEnumMap =
-                                match col.CType with
-                                | Enum e -> $" |> {e |> toFSharpLower}FromEnum"
-                                | _ -> ""
-                            yield $"                                        {col.FSharpName()} = r.{col.CName}{optionalEnumMap}\n"
-                        yield $"                                    }}:{fsharpName}) |> Array.ofSeq \n"
+                        yield $"            return result |> Seq.map {rowToRecord t} |> Array.ofSeq\n"
                     }
                 yield $"let list{fsharpName} (row:int option) (batchSize:int option) =\n"
                 yield $"    task {{\n"
@@ -410,6 +279,179 @@ let emitDomain (proj:string) (s:Schema) =
                 yield emitRunPart()
                 yield $"    }}\n"
                 yield $"\n"
+
+                // ====================================================
+                // Count
+                // ====================================================
+                yield $"let count{fsharpName} () : Task<int64> =\n"
+                yield $"    task {{\n"
+                yield $"        use! conn = Db.openConnectionAsync()\n"
+                yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                yield $"        use cmd = Db.CreateCommand<\"\"\"SELECT count(*) AS n FROM {s.SName}.{t.TName}\"\"\",SingleRow=true>(conn)\n"
+                yield $"        let! n = cmd.TaskAsyncExecute()\n"
+                yield $"        return n |> Option.flatten |> Option.defaultValue 0L\n"
+                yield $"    }}\n"
+                yield $"\n"
+
+                // ====================================================
+                // Keyset paging: page, and one list_by_<fk> per foreign key
+                // ====================================================
+                let keyCols = keyColumns t
+                let orderBy = String.Join(", ", keyCols |> List.map (fun k -> postgrestify k.CName))
+                let keysetClause =
+                    match t.PKey with
+                    | None ->
+                        "(@after_id::int IS NULL OR id > @after_id)"
+                    | Some _ ->
+                        let first = keyCols.Head
+                        let lhs = String.Join(", ", keyCols |> List.map (fun k -> postgrestify k.CName))
+                        let rhs = String.Join(", ", keyCols |> List.map (fun k -> $"@after_{k.CName}::{sqlParamType s.SName k}"))
+                        $"(@after_{first.CName}::{sqlParamType s.SName first} IS NULL OR ({lhs}) > ({rhs}))"
+                let keysetArgs =
+                    match t.PKey with
+                    | None -> [ "after_id=request.After" ]
+                    | Some _ ->
+                        [ for k in keyCols ->
+                            let conv =
+                                match k.CType with
+                                | Enum e -> $" |> {e |> toFSharpLower}ToEnum"
+                                | _ -> ""
+                            $"after_{k.CName}=(request.After |> Option.map (fun key -> key.{k.FSharpName()}{conv}))" ]
+                let nextKey =
+                    match t.PKey with
+                    | None -> "last.Id"
+                    | Some _ ->
+                        let fields = String.Join("; ", keyCols |> List.map (fun k -> $"{k.FSharpName()} = last.{k.FSharpName()}"))
+                        $"({{ {fields} }} : {t.PKeyTypeName()})"
+                let emitKeysetQuery (signature:string) (extraWhere:string) (extraArgs:string list) =
+                    stringBuffer {
+                        let args = String.Join(", ", extraArgs @ keysetArgs @ [ "limit=Some (int64 limit)" ])
+                        yield $"let {signature} : Task<{pageResultName t}> =\n"
+                        yield $"    task {{\n"
+                        yield $"        let limit = Paging.limit request.Limit\n"
+                        yield $"        use! conn = Db.openConnectionAsync()\n"
+                        yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                        yield $"        use cmd = Db.CreateCommand<\"\"\"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName}\n"
+                        yield $"            WHERE {extraWhere}{keysetClause}\n"
+                        yield $"            ORDER BY {orderBy} LIMIT @limit\"\"\",AllParametersOptional=true>(conn)\n"
+                        yield $"        let! rows = cmd.TaskAsyncExecute({args})\n"
+                        yield $"        let items = rows |> Seq.map {rowToRecord t} |> Array.ofSeq\n"
+                        yield $"        let next =\n"
+                        yield $"            if items.Length = limit then\n"
+                        yield $"                let last = items.[items.Length - 1]\n"
+                        yield $"                Some {nextKey}\n"
+                        yield $"            else None\n"
+                        yield $"        return ({{ Items = items; Next = next }} : {pageResultName t})\n"
+                        yield $"    }}\n"
+                        yield $"\n"
+                    }
+                yield emitKeysetQuery $"page{fsharpName} (request:{pageRequestName t})" "" []
+                for c in foreignKeyColumns t do
+                    yield emitKeysetQuery
+                            $"list{fsharpName}By{c.FSharpName()} (request:{fkRequestName t c})"
+                            $"{postgrestify c.CName} = @{c.CName} AND "
+                            [ $"{c.CName}=Some request.{c.FSharpName()}" ]
+
+                // ====================================================
+                // read_by_<unique cols>
+                // ====================================================
+                for cols in uniqueLookups t do
+                    let suffix = cols |> List.map (fun c -> c.FSharpName()) |> String.concat ""
+                    let whereClause = String.Join(" AND ", cols |> List.map (fun c -> $"{postgrestify c.CName} = @{c.CName}"))
+                    let args =
+                        String.Join(", ",
+                            [ for c in cols ->
+                                match c.CType with
+                                | Enum e -> $"{c.CName}=(request.{c.FSharpName()} |> {e |> toFSharpLower}ToEnum)"
+                                | _ -> $"{c.CName}=request.{c.FSharpName()}" ])
+                    yield $"let read{fsharpName}By{suffix} (request:{uniqueRequestName t cols}) : Task<{fsharpName} option> =\n"
+                    yield $"    task {{\n"
+                    yield $"        use! conn = Db.openConnectionAsync()\n"
+                    yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                    yield $"        use cmd = Db.CreateCommand<\"\"\"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName} WHERE {whereClause}\"\"\",SingleRow=true>(conn)\n"
+                    yield $"        let! result = cmd.TaskAsyncExecute({args})\n"
+                    yield $"        return result |> Option.map {rowToRecord t}\n"
+                    yield $"    }}\n"
+                    yield $"\n"
+
+                // ====================================================
+                // Named queries: optional filters + keyset paging in one static statement
+                // ====================================================
+                for q in t.Queries do
+                    let col name = t.FullCols() |> List.find (fun c -> c.CName = name)
+                    let toEnum (c:Column) =
+                        match c.CType with
+                        | Enum e -> Some $"{e |> toFSharpLower}ToEnum"
+                        | _ -> None
+                    let sqlCol (c:Column) = postgrestify c.CName
+                    let filterSql, filterArgs =
+                        [ for f in q.Filters do
+                            let c = col (filterColumnName f)
+                            let typ = sqlParamType s.SName c
+                            let field = $"request.{c.FSharpName()}"
+                            let optArg (paramName:string) (fieldExpr:string) =
+                                match toEnum c with
+                                | Some conv -> $"{paramName}=({fieldExpr} |> Option.map {conv})"
+                                | None -> $"{paramName}={fieldExpr}"
+                            match f with
+                            | Eq _ ->
+                                yield $"(@eq_{c.CName}::{typ} IS NULL OR {sqlCol c} = @eq_{c.CName}::{typ})",
+                                      [ optArg $"eq_{c.CName}" field ]
+                            | AnyOf _ ->
+                                let arg =
+                                    match toEnum c with
+                                    | Some conv -> $"any_{c.CName}=({field} |> Option.map (Array.map {conv}))"
+                                    | None -> $"any_{c.CName}={field}"
+                                yield $"(@any_{c.CName}::{typ}[] IS NULL OR {sqlCol c} = ANY(@any_{c.CName}::{typ}[]))", [ arg ]
+                            | Range _ ->
+                                yield $"(@from_{c.CName}::{typ} IS NULL OR {sqlCol c} >= @from_{c.CName}::{typ}) AND (@to_{c.CName}::{typ} IS NULL OR {sqlCol c} < @to_{c.CName}::{typ})",
+                                      [ optArg $"from_{c.CName}" $"{field}From"; optArg $"to_{c.CName}" $"{field}To" ]
+                            | Prefix _ ->
+                                // starts_with rather than LIKE: no wildcard escaping needed
+                                yield $"(@prefix_{c.CName}::text IS NULL OR starts_with({sqlCol c}, @prefix_{c.CName}))",
+                                      [ $"prefix_{c.CName}={field}StartsWith" ]
+                            | Contains _ ->
+                                yield $"(@contains_{c.CName}::text IS NULL OR strpos(lower({sqlCol c}), lower(@contains_{c.CName})) > 0)",
+                                      [ $"contains_{c.CName}={field}Contains" ] ]
+                        |> List.unzip
+                    let pagingSql, pagingArgs, orderSql, nextCursor =
+                        match q.OrderBy with
+                        | [] -> keysetClause, keysetArgs, orderBy, nextKey
+                        | _ ->
+                            let cursorCols = queryCursorColumns t q
+                            let dir, cmp = if queryDescending q then "DESC", "<" else "ASC", ">"
+                            let first = cursorCols.Head
+                            let lhs = String.Join(", ", cursorCols |> List.map sqlCol)
+                            let rhs = String.Join(", ", cursorCols |> List.map (fun c -> $"@after_{c.CName}::{sqlParamType s.SName c}"))
+                            let args =
+                                [ for c in cursorCols ->
+                                    let conv = match toEnum c with Some f -> $" |> {f}" | None -> ""
+                                    $"after_{c.CName}=(request.After |> Option.map (fun cursor -> cursor.{c.FSharpName()}{conv}))" ]
+                            let fields = String.Join("; ", cursorCols |> List.map (fun c -> $"{c.FSharpName()} = last.{c.FSharpName()}"))
+                            $"(@after_{first.CName}::{sqlParamType s.SName first} IS NULL OR ({lhs}) {cmp} ({rhs}))",
+                            args,
+                            String.Join(", ", cursorCols |> List.map (fun c -> $"{sqlCol c} {dir}")),
+                            $"({{ {fields} }} : {queryCursorName t q})"
+                    let whereSql = String.Join("\n              AND ", filterSql @ [ pagingSql ])
+                    let args = String.Join(", ", List.concat filterArgs @ pagingArgs @ [ "limit=Some (int64 limit)" ])
+                    yield $"let query{fsharpName}{toFSharp q.QName} (request:{queryRequestName t q}) : Task<{queryResultName t q}> =\n"
+                    yield $"    task {{\n"
+                    yield $"        let limit = Paging.limit request.Limit\n"
+                    yield $"        use! conn = Db.openConnectionAsync()\n"
+                    yield $"        do! TenantRls.applyAmbientToConnection conn\n"
+                    yield $"        use cmd = Db.CreateCommand<\"\"\"SELECT {fullPostgresCols} FROM {s.SName}.{t.TName}\n"
+                    yield $"            WHERE {whereSql}\n"
+                    yield $"            ORDER BY {orderSql} LIMIT @limit\"\"\",AllParametersOptional=true>(conn)\n"
+                    yield $"        let! rows = cmd.TaskAsyncExecute({args})\n"
+                    yield $"        let items = rows |> Seq.map {rowToRecord t} |> Array.ofSeq\n"
+                    yield $"        let next =\n"
+                    yield $"            if items.Length = limit then\n"
+                    yield $"                let last = items.[items.Length - 1]\n"
+                    yield $"                Some {nextCursor}\n"
+                    yield $"            else None\n"
+                    yield $"        return ({{ Items = items; Next = next }} : {queryResultName t q})\n"
+                    yield $"    }}\n"
+                    yield $"\n"
                 yield $"\n"
         }
     let apiWireup =
@@ -421,15 +463,9 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"open {projCap}.Domain.{domain}\n"
             yield $"\n"
             yield $"// Wire up the api definition to the service layer calls here\n"
-            yield $"let api = {{\n"
-            for t in s.Tables do
-                let fsharpName = t.FSharpName()
-                yield $"    // -------------------------------------------\n"
-                yield $"    Create{fsharpName} = Service.create{fsharpName}\n"
-                yield $"    Read{fsharpName} = Service.read{fsharpName}\n"
-                yield $"    Update{fsharpName} = Service.update{fsharpName}\n"
-                yield $"    Delete{fsharpName} = Service.delete{fsharpName}\n"
-                yield $"    List{fsharpName} = Service.list{fsharpName}\n"
+            yield $"let api : Api = {{\n"
+            for op in operations do
+                yield $"    {op.Name} = Service.{op.FunctionName}\n"
             yield "}\n"
 
         }
@@ -440,141 +476,137 @@ let emitDomain (proj:string) (s:Schema) =
             yield $"\n"
             yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
-            yield $"open Plough.ControlFlow\n"
             yield $"\n"
-            yield $"// PgGen: note - these are simple wrappers for now but business logic / transactions / multiple IO calls can be handled here\n"
+            yield $"// PgGen: note - these are simple wrappers for now but business logic / validation / transactions /\n"
+            yield $"// multiple IO calls can be handled here.  Return Error (NotFound / Validation / Conflict ..) for\n"
+            yield $"// expected failures; exceptions are turned into api errors by the web layer.\n"
+            let wrap (signature:string) (call:string) =
+                stringBuffer {
+                    yield $"let {signature} =\n"
+                    yield $"    task {{\n"
+                    yield $"        let! result = {call}\n"
+                    yield $"        return Ok result\n"
+                    yield $"    }}\n"
+                    yield $"\n"
+                }
             for t in s.Tables do
-                let tableCap = t.FSharpName()
+                // update / delete: zero rows affected means there was nothing (visible) to change
+                let wrapRowCount (signature:string) (call:string) (keyExpr:string) =
+                    stringBuffer {
+                        yield $"let {signature} =\n"
+                        yield $"    task {{\n"
+                        yield $"        let! rows = {call}\n"
+                        yield $"        if rows = 0 then\n"
+                        yield $"            let key = {keyExpr}\n"
+                        yield $"            return Error (NotFound $\"{t.TName} {{key}} not found\")\n"
+                        yield $"        else\n"
+                        yield $"            return Ok ()\n"
+                        yield $"    }}\n"
+                        yield $"\n"
+                    }
+                // key as text for the NotFound message, e.g. 42 or 7/red for composite keys
+                let compositeKeyExpr (pk:PKey) =
+                    String.Join(" + \"/\" + ", [ for c in pk.Cols -> $"string request.{c |> toFSharp}" ])
                 yield $"// -------------------------------------------\n"
-                yield $"let create{tableCap} (request:Create{tableCap}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.create{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let read{tableCap} (request:{t.PKeyTypeName()}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.read{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let update{tableCap} (request:Update{tableCap}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.update{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let delete{tableCap} (request:{t.PKeyTypeName()}) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.delete{tableCap} request\n"
-                yield $"    }}\n"
-                yield $"\n"
-
-                yield $"let list{tableCap} (batchOffset:BatchOffset) =\n"
-                yield $"    taskEither {{\n"
-                yield $"        return! Storage.list{tableCap} batchOffset.Offset batchOffset.BatchSize\n"
-                yield $"    }}\n"
-                yield $"\n"
+                for op in tableOperations t do
+                    let signature = $"{op.FunctionName} (request:{op.ArgType.FSharp()}) : ApiResult<{op.Result.FSharp()}>"
+                    match op.Kind with
+                    | UpdateOp ->
+                        let keyExpr =
+                            match t.PKey with
+                            | None -> "string request.Id"
+                            | Some pk -> compositeKeyExpr pk
+                        yield wrapRowCount signature $"Storage.{op.FunctionName} request" keyExpr
+                    | DeleteOp ->
+                        let keyExpr =
+                            match t.PKey with
+                            | None -> "string request"
+                            | Some pk -> compositeKeyExpr pk
+                        yield wrapRowCount signature $"Storage.{op.FunctionName} request" keyExpr
+                    | ListOp ->
+                        yield wrap signature $"Storage.{op.FunctionName} request.Offset request.BatchSize"
+                    | CountOp ->
+                        yield wrap $"{op.FunctionName} () : ApiResult<{op.Result.FSharp()}>" $"Storage.{op.FunctionName} ()"
+                    | CreateOp | ReadOp | PageOp | ListByOp _ | ReadByOp _ | QueryOp _ ->
+                        yield wrap signature $"Storage.{op.FunctionName} request"
         }
+    // Api contract + client.  Compiled into the shared project, so it must not depend on server or
+    // database libraries.  A namespace (rather than a module) lets the server routing live in a
+    // separate backend-only file while still being addressable as {domain}.Server
     let apiDef =
         stringBuffer {
-            yield $"module {projCap}.Api.{domain}\n"
+            yield $"namespace {projCap}.Api.{domain}\n"
             yield $"\n"
-            yield $"open Plough.ControlFlow\n"
-            yield $"open Plough.WebApi.Client\n"
-            yield $"open Plough.WebApi.Server\n"
-            yield $"open Plough.WebApi.Server.Plain\n"
+            yield $"open System\n"
+            yield $"open System.Net.Http\n"
             yield $"open {projCap}.Common\n"
             yield $"open {projCap}.Domain.{domain}\n"
 
             yield $"\n"
-            yield $"type Api ={{\n"
-            for t in s.Tables do
-                let tableCap = t.FSharpName()
-                match t.PKey with
-                | None ->
-                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<{t.PKeyTypeName()}>\n"
-                | Some _ ->
-                    yield $"    Create{tableCap} : Create{tableCap} -> TaskEither<unit>\n"
-                yield $"    Read{tableCap}   : {t.PKeyTypeName()} -> TaskEither<{tableCap} option>\n"
-                yield $"    Update{tableCap} : Update{tableCap} -> TaskEither<unit>\n"
-                yield $"    Delete{tableCap} : {t.PKeyTypeName()} -> TaskEither<string>\n"
-                yield $"    List{tableCap} : BatchOffset -> TaskEither<{tableCap} []>\n"
+            yield $"type Api = {{\n"
+            for op in operations do
+                yield $"    /// {op.Summary}\n"
+                yield $"    {op.Name} : {op.ArgType.FSharp()} -> ApiResult<{op.Result.FSharp()}>\n"
             yield $"}}\n"
-
-            // -------------------------------------------
-            // Server api
-            // -------------------------------------------
-            yield $"module Server =\n"
-
-
-            yield $"    let build<'ctx> (api : Api) : ApiServer<'ctx> = subRoute \"/{s.SName}\" <| choose [\n"
-            yield $"        GET >=> choose [\n"
-            for t in s.Tables do
-                let tableCap = t.FSharpName()
-                let canUseGet =
-                    match t.PKey with
-                    | None -> true
-                    | Some _ -> false
-                if canUseGet then
-                    yield $"            routef \"/{t.TName}/read/%%i\" (makeJSONHandlerWithArgAsync api.Read{tableCap})\n"
-                yield $"            route \"/{t.TName}/list\" >=> makeJSONHandlerWithQueryParamAsync api.List{tableCap} \n"
-            yield $"        ]\n"
-            yield $"        POST >=> choose [\n"
-            for t in s.Tables do
-                let tableCap = t.FSharpName()
-                let needsPostForGet =
-                    match t.PKey with
-                    | None -> false
-                    | Some _ -> true
-                if needsPostForGet then
-                    yield $"            route \"/{t.TName}/read\" >=> makeJSONHandlerWithObjAsync api.Read{tableCap}\n"
-                yield $"            route \"/{t.TName}/create\" >=> makeJSONHandlerWithObjAsync api.Create{tableCap}\n"
-                yield $"            route \"/{t.TName}/update\" >=> makeJSONHandlerWithObjAsync api.Update{tableCap}\n"
-                yield $"            route \"/{t.TName}/delete\" >=> makeJSONHandlerWithObjAsync api.Delete{tableCap}\n"
-            yield $"        ]\n"
-            yield $"    ]\n"
 
             // -------------------------------------------
             // Client
             // -------------------------------------------
-            yield $"type Client(client : ClientBuilder) =\n"
-            yield $"    inherit ClientBuilder(Nested(\"{s.SName}\", client))\n"
             yield $"\n"
-            for t in s.Tables do
-                let tableCap = t.FSharpName()
-                let createReturnType =
-                    match t.PKey with
-                    | None -> t.PKeyTypeName()
-                    | Some _ -> "unit"
-                yield $"    member x.Create{tableCap}(doc:Create{tableCap}) : TaskEither<{createReturnType}> =\n"
-                yield $"        x.Post(\"{t.TName}/create\",doc)\n"
-                yield $"    member x.Read{tableCap}(docId:int) : TaskEither<{tableCap} option> =\n"
-                let needsPostForGet =
-                    match t.PKey with
-                    | None -> false
-                    | Some _ -> true
-                if needsPostForGet then
-                    yield $"        x.Post(\"{t.TName}/read\",docId)\n"
-                else
-                    yield $"        x.Get <| $\"{t.TName}/read/{{docId}}\"\n"
-                yield $"    member x.Update{tableCap}(doc:Update{tableCap}) : TaskEither<unit> =\n"
-                yield $"        x.Post(\"{t.TName}/update\",doc)\n"
+            yield $"/// Typed client for the {s.SName} api.  basePath is relative to HttpClient.BaseAddress\n"
+            yield $"type Client(http : HttpClient, basePath : string) =\n"
+            for op in operations do
+                let path = $"{{basePath}}{op.Path}"
+                let result = op.Result.FSharp()
+                yield $"    /// {op.Summary}\n"
+                match op.Arg with
+                | RouteId ->
+                    yield $"    member x.{op.Name}(id:{op.ArgType.FSharp()}) : ApiResult<{result}> =\n"
+                    yield $"        ApiClient.get http $\"{path}/{{id}}\"\n"
+                | OffsetQuery ->
+                    // query parameter names must match what Handlers.withBatchOffset reads
+                    yield $"    member x.{op.Name}(?offset:int, ?batchSize:int) : ApiResult<{result}> =\n"
+                    yield $"        ApiClient.get http (ApiClient.withQuery $\"{path}\" [ \"offset\", offset; \"batchSize\", batchSize ])\n"
+                | NoArg ->
+                    yield $"    member x.{op.Name}() : ApiResult<{result}> =\n"
+                    yield $"        ApiClient.get http $\"{path}\"\n"
+                | JsonBody ->
+                    yield $"    member x.{op.Name}(request:{op.ArgType.FSharp()}) : ApiResult<{result}> =\n"
+                    yield $"        ApiClient.post http $\"{path}\" request\n"
+        }
 
-                yield $"    member x.Delete{tableCap}(docId:int) : TaskEither<string> =\n"
-                yield $"        x.Post(\"{t.TName}/delete\",docId)\n"
-                yield $"    member x.List{tableCap}(offset:int option,batchSize:int option) : TaskEither<{tableCap} []> =\n"
-                yield $"        match offset,batchSize with\n"
-                yield $"                 | Some o,Some b -> $\"{t.TName}/list?offset={{offset}}&batch={{batchSize}}\"\n"
-                yield $"                 | None ,Some b -> $\"{t.TName}/list?batch={{batchSize}}\"\n"
-                yield $"                 | Some o,None -> $\"{t.TName}/list?offset={{offset}}\"\n"
-                yield $"                 | None ,None -> $\"{t.TName}/list\"\n"
-                yield $"        |> x.Get\n"
-            // yield $"        }}\n"
+    // Server side routing for the api (plain Giraffe).  Backend only.
+    let apiServer =
+        stringBuffer {
+            yield $"namespace {projCap}.Api.{domain}\n"
+            yield $"\n"
+            yield $"open Giraffe\n"
+            yield $"\n"
+            yield $"module Server =\n"
+            yield $"    module H = {projCap}.Api.Handlers\n"
+            yield $"\n"
+            yield $"    /// Routes for the {s.SName} api, mounted under /{s.SName}\n"
+            yield $"    let build (api : Api) : HttpHandler = subRoute \"/{s.SName}\" (choose [\n"
+            yield $"        GET >=> choose [\n"
+            for op in operations do
+                match op.Arg with
+                | RouteId -> yield $"            routef \"{op.Path}/%%i\" (H.withArg api.{op.Name})\n"
+                | OffsetQuery -> yield $"            route \"{op.Path}\" >=> H.withBatchOffset api.{op.Name}\n"
+                | NoArg -> yield $"            route \"{op.Path}\" >=> H.respond (fun _ -> api.{op.Name} ())\n"
+                | JsonBody -> ()
+            yield $"        ]\n"
+            yield $"        POST >=> choose [\n"
+            for op in operations do
+                match op.Arg with
+                | JsonBody -> yield $"            route \"{op.Path}\" >=> H.withBody api.{op.Name}\n"
+                | RouteId | OffsetQuery | NoArg -> ()
+            yield $"        ]\n"
+            yield $"    ])\n"
         }
     {| Storage = storageCode
        ApiWireup = apiWireup
        ApiDef = apiDef
+       ApiServer = apiServer
        Domain = domainCode
        ServiceLayer = serviceLayer|}
 
@@ -584,6 +616,7 @@ let generateMasterServerApiFile (proj:string) (d:Db) =
         let dbCap = d.DName |> titleCase
         let projCap = proj |> titleCase
         yield $"open   {projCap}.Api\n"
+        yield $"open   Giraffe\n"
         yield $"\n"
         // Definition of the master Api type with functions
         yield $"type {projCap}Api = {{\n"
@@ -598,18 +631,32 @@ let generateMasterServerApiFile (proj:string) (d:Db) =
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
             yield $"    {schemaCap} = {projCap}.Domain.{schemaCap}.Api.api\n"
-        yield $"}}"
-
+        yield $"}}\n"
         yield $"\n"
+        yield $"/// The OpenAPI document, generated by PgGen with this code and embedded at build time\n"
+        yield $"let openApiJson =\n"
+        yield $"    lazy (\n"
+        yield $"        use stream = typeof<{projCap}Api>.Assembly.GetManifestResourceStream \"openapi.json\"\n"
+        yield $"        use reader = new System.IO.StreamReader(stream)\n"
+        yield $"        reader.ReadToEnd())\n"
+        yield $"\n"
+        yield $"/// Every schema's routes under /api, plus GET /api/openapi.json - add this to your Giraffe app\n"
+        yield $"/// (app.UseGiraffe handler)\n"
+        yield $"let handler (api : {projCap}Api) : Giraffe.Core.HttpHandler =\n"
+        yield $"    Giraffe.Routing.subRoute \"/api\" (Giraffe.Core.choose [\n"
+        yield $"        Giraffe.Core.GET >=> Giraffe.Routing.route \"/openapi.json\"\n"
+        yield $"            >=> Giraffe.Core.setHttpHeader \"Content-Type\" \"application/json\"\n"
+        yield $"            >=> Giraffe.Core.warbler (fun _ -> Giraffe.Core.setBodyFromString openApiJson.Value)\n"
+        for s in d.Schemas do
+            let schemaCap = titleCase s.SName
+            yield $"        {schemaCap}.Server.build api.{schemaCap}\n"
+        yield $"    ])\n"
     }
 let generateMasterClientApiFile (proj:string) (d:Db) =
     let projCap = proj |> titleCase
     stringBuffer {
         yield $"namespace {projCap}.Api\n"
-        yield $"open Plough.WebApi.Client\n"
-        let dbCap = d.DName |> titleCase
-        //yield $"open   {dbCap}.Api\n"
-        //yield $"\n"
+        yield $"open System.Net.Http\n"
         // Definition of the master Api type with functions
         yield "/// Top level api type definition\n"
         yield $"type Api = {{\n"
@@ -617,11 +664,14 @@ let generateMasterClientApiFile (proj:string) (d:Db) =
             let schemaCap = titleCase s.SName
             yield $"    {schemaCap} : {schemaCap}.Api\n"
         yield $"}}\n"
-        yield $"type {projCap} (client : ApiClient) =\n"
-        yield $"    inherit ClientBuilder(Root(\"/api\", client))\n"
+        yield $"\n"
+        yield $"/// Typed client for the whole api.  Set http.BaseAddress to the server root (ending in /);\n"
+        yield $"/// basePath (default \"api\") is where the server mounted the api.\n"
+        yield $"type {projCap} (http : HttpClient, basePath : string) =\n"
+        yield $"    new (http : HttpClient) = {projCap}(http, \"api\")\n"
         for s in d.Schemas do
             let schemaCap = titleCase s.SName
-            yield $"    member x.{schemaCap} = {schemaCap}.Client(x)\n"
+            yield $"    member x.{schemaCap} = {schemaCap}.Client(http, basePath + \"/{s.SName}\")\n"
 
         yield $"\n"
     }
@@ -629,6 +679,44 @@ let generateMasterClientApiFile (proj:string) (d:Db) =
 
 let cleanSlash (path:string) =
     path.Replace("\\","/")
+
+/// Nearest file called name in folder or any of its parents (mirrors how MSBuild finds Directory.*.props)
+let rec private findFileAbove (folder:string) (name:string) =
+    let candidate = Path.Combine(folder, name)
+    if File.Exists candidate then Some candidate
+    else
+        match Directory.GetParent folder with
+        | null -> None
+        | parent -> findFileAbove parent.FullName name
+
+/// Generated projects use NuGet Central Package Management.  Write a Directory.Packages.props
+/// next to them unless the surrounding repo already manages versions centrally, in which case we
+/// leave that file alone and tell the user which versions it needs.
+let private writePackageProps (folder:string) =
+    let fullFolder = Path.GetFullPath folder
+    let ownProps = Path.Combine(fullFolder, "Directory.Packages.props")
+    let isGenerated (path:string) = File.ReadAllText(path).Contains(generatedPropsMarker)
+    match findFileAbove fullFolder "Directory.Packages.props" with
+    | Some existing when not (isGenerated existing) ->
+        printfn $"Found {existing |> cleanSlash}, not generating Directory.Packages.props."
+        printfn "Make sure it contains versions for these packages:"
+        for line in packageVersionLines () do
+            printfn $"{line}"
+    | _ ->
+        printfn $"Generating {ownProps |> cleanSlash}"
+        File.WriteAllText(ownProps, directoryPackagesPropsSource ())
+
+/// Older versions of PgGen generated paket files.  We don't delete user files, but say so.
+let private warnAboutPaket (folder:string) =
+    let leftovers =
+        [ "paket.dependencies"; "paket.references"; "paket.lock"; ".paket" ]
+        |> List.filter (fun f -> File.Exists(Path.Combine(folder, f)) || Directory.Exists(Path.Combine(folder, f)))
+    if not leftovers.IsEmpty then
+        let names = String.Join(", ", leftovers)
+        printfn $"WARNING: {folder |> cleanSlash} contains paket files from an older PgGen ({names})."
+        printfn "         Generated projects now use NuGet central package management; these can be deleted"
+        printfn "         (along with the paket entry in .config/dotnet-tools.json)."
+
 let generate (proj:string) (folder:string) (d:Db) =
     let projCap = titleCase proj
     ensureFolder folder
@@ -650,13 +738,19 @@ let generate (proj:string) (folder:string) (d:Db) =
             let serviceFile = Path.Combine(schemaSubFolder,$"{schemaCap}Service.fs")
             let domainFile = Path.Combine(schemaSubFolder,$"{schemaCap}Domain.fs")
             let apiDefFile = Path.Combine("Api",$"{schemaCap}Api.fs")
+            let apiServerFile = Path.Combine("Api",$"{schemaCap}ApiServer.fs")
             let apiWireupFile = Path.Combine("Api",$"{schemaCap}ApiWireup.fs")
 
             yield domainFile
             yield apiDefFile // api uses data structures from domainFile
             yield storageFile
             yield serviceFile
+            yield apiServerFile // server routing needs the Api type from apiDefFile
             yield apiWireupFile
+
+            let fullApiServerFile = Path.Combine(folder, apiServerFile)
+            printfn $"  generating {fullApiServerFile|> cleanSlash}"
+            File.WriteAllText(fullApiServerFile, code.ApiServer)
 
             let fullStorageFile = Path.Combine(folder, storageFile)
             printfn $"  generating {fullStorageFile|> cleanSlash}"
@@ -713,68 +807,100 @@ let generate (proj:string) (folder:string) (d:Db) =
     ]
 
 
-    let apiFiles,nonApiFiles = generatedFileNames |> List.partition (fun x -> x.StartsWith("Api/") || x.StartsWith("Api\\"))
+    let commonFile, dbFile =
+        match auxFileNames with
+        | [ c; d ] -> c, d
+        | x -> failwithf $"Internal error: unexpected aux files {x}"
 
-    let fileNames = auxFileNames @ nonApiFiles @ apiFiles
     // might be a good idea long term to strongly type these different file types since we need different subsets
-    let domainFiles = nonApiFiles |> List.filter (fun x -> x.EndsWith("Domain.fs"))
+    let isSharedFile (file:string) =
+        file.EndsWith("Domain.fs")
+        || (file.EndsWith("Api.fs") && (file.StartsWith("Api/") || file.StartsWith("Api\\"))
+            && not (file.EndsWith($"{projCap}ServerApi.fs")))
+    let isApiFolderFile (file:string) = file.StartsWith("Api/") || file.StartsWith("Api\\")
 
-    // write out an fsproj file with all the individual files in it
+    let sharedFiles = generatedFileNames |> List.filter isSharedFile
+    let backendFiles = generatedFileNames |> List.filter (isSharedFile >> not)
+    // the api folder files go last since they depend on the service layer
+    let backendApiFiles, backendDomainFiles = backendFiles |> List.partition isApiFolderFile
+
+    let packageRefs (packages:string list) =
+        stringBuffer {
+            yield $"  <ItemGroup>\n"
+            for p in packages do
+                yield $"    <PackageReference Include=\"{p}\" />\n" // versions live in Directory.Packages.props
+            yield $"  </ItemGroup>\n"
+        }
+
+    // Shared project: domain types, api contract and client.  No server / database dependencies so
+    // that front ends and other non backend consumers can reference it.
+    let apiProjName = $"{projCap}Api.fsproj"
+    let apiProjContent =
+        stringBuffer {
+            yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+            yield $"  <PropertyGroup>\n"
+            yield $"    <TargetFramework>{sharedTargetFramework}</TargetFramework>\n"
+            yield $"    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>\n"
+            yield $"  </PropertyGroup>\n"
+            yield $"  <ItemGroup>\n"
+            yield $"    <Compile Include=\"../{commonFile |> cleanSlash}\" />\n"
+            for file in sharedFiles do
+                if isApiFolderFile file then
+                    yield $"    <Compile Include=\"{file[4..]|> cleanSlash}\" />\n" // remove Api/ prefix
+                else
+                    yield $"    <Compile Include=\"../{file|> cleanSlash}\" />\n"
+            yield $"    <Compile Include=\"{projCap}ClientApi.fs\" />\n"
+            yield $"  </ItemGroup>\n"
+            yield packageRefs sharedPackages
+            yield $"</Project>\n"
+        }
+    let apiProjPath = Path.Combine(folder,"Api",apiProjName)
+    printfn $"Generating {apiProjPath|> cleanSlash}"
+    File.WriteAllText(apiProjPath, apiProjContent)
+
+    // Giraffe handlers shared by all the schema server files (backend only)
+    let handlersFile = Path.Combine("Api", "ApiHandlers.fs")
+    // OpenAPI document: produced from the same model as the code, embedded in the backend and
+    // served at /api/openapi.json
+    let openApiFile = Path.Combine("Api", "openapi.json")
+    printfn $"Generating {Path.Combine(folder, openApiFile) |> cleanSlash}"
+    File.WriteAllText(Path.Combine(folder, openApiFile), OpenApi.document proj pgGenVersion d)
+    File.WriteAllText(Path.Combine(folder, handlersFile), handlersFileSource proj)
+
+    // Backend project: database access, service layer and server side api.  References the
+    // shared project rather than recompiling its files so the types are identical on both sides.
     let fsProjContent =
         stringBuffer {
             yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
             yield $"  <PropertyGroup>\n"
             yield $"    <TargetFramework>net{dotnetVersion}</TargetFramework>\n"
+            yield $"    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>\n"
             yield $"  </PropertyGroup>\n"
             yield $"  <ItemGroup>\n"
-            for file in fileNames do
+            yield $"    <Compile Include=\"{dbFile|> cleanSlash}\" />\n"
+            yield $"    <Compile Include=\"{handlersFile |> cleanSlash}\" />\n"
+            for file in backendDomainFiles @ backendApiFiles do
                 yield $"    <Compile Include=\"{file|> cleanSlash}\" />\n"
             yield $"  </ItemGroup>\n"
-            yield $"  <Import Project=\".paket\\Paket.Restore.targets\" />"
+            yield $"  <ItemGroup>\n"
+            yield $"    <ProjectReference Include=\"Api/{apiProjName}\" />\n"
+            yield $"  </ItemGroup>\n"
+            yield $"  <ItemGroup>\n"
+            yield $"    <EmbeddedResource Include=\"{openApiFile |> cleanSlash}\" LogicalName=\"openapi.json\" />\n"
+            yield $"  </ItemGroup>\n"
+            yield packageRefs backendPackages
             yield $"</Project>\n"
         }
     let fsProjPath = Path.Combine(folder, $"{projCap}.Backend.fsproj")
     printfn $"Generating {fsProjPath|> cleanSlash}"
     File.WriteAllText(fsProjPath, fsProjContent)
 
-    // write out a client api fsproj file with all the individual files in it
-    let apiProjContent =
-        stringBuffer {
-            yield $"<Project Sdk=\"Microsoft.NET.Sdk\">\n"
-            yield $"  <PropertyGroup>\n"
-            yield $"    <TargetFramework>net10.0</TargetFramework>\n"
-            yield $"  </PropertyGroup>\n"
-            yield $"  <ItemGroup>\n"
-            yield $"    <Compile Include=\"../Common/Common.fs\" />\n"
-            for file in domainFiles do
-                yield $"    <Compile Include=\"../{file|> cleanSlash}\" />\n"
-            for file in apiFiles do
-                if file.EndsWith("Wireup.fs") ||
-                    file.EndsWith($"{projCap}ServerApi.fs") then
-                    () // skip these files
-                else
-                    yield $"    <Compile Include=\"{file[4..]|> cleanSlash}\" />\n" // remove Api/ prefix
-            yield $"    <Compile Include=\"{projCap}ClientApi.fs\" />\n"
-            yield $"  </ItemGroup>\n"
-            yield $"  <Import Project=\"..\\.paket\\Paket.Restore.targets\" />"
-            yield $"</Project>\n"
-        }
-    let apiProjPath = Path.Combine(folder,"Api",$"{projCap}Api.fsproj")
-    printfn $"Generating {apiProjPath|> cleanSlash}"
-    File.WriteAllText(apiProjPath, apiProjContent)
-
 
     let compileTimeDbFile = Path.Combine(folder,compileTimeDbFile)
     File.WriteAllText(compileTimeDbFile,$"Host=127.0.0.1;Username=read_write;Password=readwrite;Database={d.DName};Pooling=true")
 
-    let paketDepsFile = Path.Combine(folder, "paket.dependencies")
-    let paketRefsFile = Path.Combine(folder, "paket.references")
-    let configFolder = Path.Combine(folder, ".config")
-    ensureFolder configFolder
-    File.WriteAllText(Path.Combine(configFolder, "dotnet-tools.json"), dotnetToolsJson)
-
-    File.WriteAllText(paketDepsFile, paketFile)
-    File.WriteAllText(paketRefsFile, paketReferencesFile)
+    writePackageProps folder
+    warnAboutPaket folder
 
 (* future work
 

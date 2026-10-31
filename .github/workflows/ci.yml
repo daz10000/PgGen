@@ -1,0 +1,52 @@
+name: CI
+
+# Build + pack on every push / PR.  The version comes from the first heading in RELEASE_NOTES.md.
+# Pushing a tag vX.Y.Z publishes FSharp.PgGen X.Y.Z to nuget.org (needs a NUGET_API_KEY repository
+# secret); the tag must match RELEASE_NOTES.md, so every release has notes.
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Check tag matches RELEASE_NOTES.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(dotnet msbuild PgGen.fsproj -getProperty:Version)
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version from RELEASE_NOTES.md"
+            exit 1
+          fi
+
+      # smoke test: the demo script loads bin/Debug/net10.0/PgGen.dll and emits SQL
+      - run: dotnet build -c Debug
+      - run: dotnet fsi protein_demo.fsx > /dev/null
+
+      - run: dotnet build -c Release
+
+      - run: dotnet pack -c Release --no-build -o artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: artifacts/*
+
+      - name: Publish to nuget.org
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

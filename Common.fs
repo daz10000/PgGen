@@ -3,8 +3,11 @@ module PgGen.Common
 open System.Text.RegularExpressions
 
 
-let dotnetVersion = "9.0"
-let paketVersion = "9.0.2" // has to match dotnet version
+/// Target framework (minus the "net" prefix) for generated backend projects
+let dotnetVersion = "10.0"
+/// Target framework for the generated shared (domain types + api contract + client) project.
+/// Same as the backend: consumers are .NET (backends, Blazor/MAUI) or Fable (which compiles source).
+let sharedTargetFramework = $"net{dotnetVersion}"
 
 let (|Regex|_|) pattern input =
     let m = Regex.Match(input, pattern)
@@ -33,3 +36,11 @@ let toFSharpLower( s:string) =
 
 let titleCase (s:string) =
     System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s)
+
+/// FSharp.PgGen package version (set from RELEASE_NOTES.md when PgGen is built)
+let pgGenVersion =
+    let asm = System.Reflection.Assembly.GetExecutingAssembly()
+    match asm.GetCustomAttributes(typeof<System.Reflection.AssemblyInformationalVersionAttribute>, false) with
+    | [| :? System.Reflection.AssemblyInformationalVersionAttribute as v |] ->
+        v.InformationalVersion.Split('+').[0] // drop source link commit hash
+    | _ -> asm.GetName().Version.ToString(3)

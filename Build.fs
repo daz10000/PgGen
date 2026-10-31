@@ -38,6 +38,14 @@ let table (name:string) (tableAttr:TableAttr list) (body:TableBodyItem list) =
                             c
                         | _ -> ()
             ]
+            Queries = [ for b in body do
+                        match b with
+                        | QueryItem q -> q
+                        | _ -> () ]
+            Indexes = [ for b in body do
+                        match b with
+                        | IndexItem i -> i
+                        | _ -> () ]
             Uniques = [ for b in body do
                         match b with
                         | Unique u -> u
@@ -100,6 +108,18 @@ let db (name:string) (dbAttr:DBAttr list) (body:DBBodyItem list) =
             | _ -> defaultOwner
         Comment = comment
     }
+
+/// Named query: filters (all optional at run time) and sort order, e.g.
+///   query "search" [ Filter [ Eq "id_organism"; Prefix "label" ]; OrderBy [ Desc "created" ] ]
+let query (name:string) (parts:QueryPart list) =
+    QueryItem
+        { QName = name
+          Filters = parts |> List.collect (function Filter fs -> fs | _ -> [])
+          OrderBy = parts |> List.collect (function OrderBy os -> os | _ -> []) }
+
+/// Secondary index on the given columns (foreign key columns are indexed automatically)
+let index (cols:string list) =
+    IndexItem { Cols = cols }
 
 let unique (cols:string list) =
     Unique {
